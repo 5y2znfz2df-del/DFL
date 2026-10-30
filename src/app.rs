@@ -442,10 +442,10 @@ impl eframe::App for LauncherApp {
         let p = self.p();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(p.bg).inner_margin(egui::Margin {
-                left: 28,
-                right: 28,
-                top: 24,
-                bottom: 16,
+                left: 26,
+                right: 26,
+                top: 16,
+                bottom: 12,
             }))
             .show(ctx, |ui| match self.page {
                 Page::Home => self.page_home(ui),
@@ -515,10 +515,23 @@ impl LauncherApp {
         let stats = [
             (
                 "账户",
-                if self.config.username.is_empty() {
-                    "Steve".to_string()
-                } else {
-                    self.config.username.clone()
+                match self.accounts.active_account() {
+                    Some(a) => format!(
+                        "{}·{}",
+                        a.name,
+                        match a.kind.as_str() {
+                            "microsoft" => "正版",
+                            "yggdrasil" => "外置",
+                            _ => "离线",
+                        }
+                    ),
+                    None => {
+                        if self.config.username.is_empty() {
+                            "Steve·离线".to_string()
+                        } else {
+                            format!("{}·离线", self.config.username)
+                        }
+                    }
                 },
             ),
             ("版本数", format!("{}", self.versions.len())),
@@ -541,6 +554,7 @@ impl LauncherApp {
         });
 
         ui.add_space(14.0);
+        let mut switch_id: Option<String> = None;
         let mut go_versions = false;
         let mut go_instances = false;
         let mut go_accounts = false;
@@ -558,7 +572,57 @@ impl LauncherApp {
                     go_accounts = true;
                 }
             });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("角色").size(10.5).color(p.sub));
+                let current = self
+                    .accounts
+                    .active_account()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| {
+                        if self.config.username.is_empty() {
+                            "Steve".to_string()
+                        } else {
+                            self.config.username.clone()
+                        }
+                    });
+                egui::ComboBox::from_id_salt("home_account")
+                    .selected_text(RichText::new(current).size(12.0))
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        let list = self.accounts.accounts.clone();
+                        if list.is_empty() {
+                            ui.label("还没有账号");
+                        }
+                        for a in &list {
+                            let label = format!(
+                                "{} · {}",
+                                a.name,
+                                match a.kind.as_str() {
+                                    "microsoft" => "正版",
+                                    "yggdrasil" => "外置",
+                                    _ => "离线",
+                                }
+                            );
+                            if ui.selectable_label(false, label).clicked() {
+                                switch_id = Some(a.id.clone());
+                            }
+                        }
+                    });
+                if ui.add(ghost_button(&p, "添加", 54.0)).clicked() {
+                    go_accounts = true;
+                }
+            });
         });
+        if let Some(id) = switch_id {
+            self.accounts.active = Some(id.clone());
+            if let Some(a) = self.accounts.accounts.iter().find(|a| a.id == id) {
+                self.config.username = a.name.clone();
+            }
+            let _ = self.accounts.save();
+            let _ = self.config.save();
+            self.notify("已切换角色");
+        }
         if start {
             self.start_game();
         }
@@ -1006,18 +1070,13 @@ impl LauncherApp {
                         }
                         1 => {
                             ui.label(
-                                RichText::new("前提：该微软账号已购买 Minecraft Java 版，或已开通 PC Game Pass")
+                                RichText::new("暂不可用：需要 Azure 客户端 ID（注册要验证银行卡），建议直接用离线登录")
                                     .size(10.0)
-                                    .color(p.sub),
+                                    .color(Color32::from_rgb(255, 149, 0)),
                             );
-                            ui.add_space(4.0);
-                            if ui
-                                .add(ghost_button(&p, "没买？去官网看看", 118.0))
-                                .clicked()
-                            {
-                                util::open_url(
-                                    "https://www.minecraft.net/zh-hans/store/minecraft-java-bedrock-edition-pc",
-                                );
+                            ui.add_space(6.0);
+                            if ui.add(ghost_button(&p, "改用离线登录", 104.0)).clicked() {
+                                self.acc_tab = 0;
                             }
                             ui.add_space(8.0);
                             ui.label(

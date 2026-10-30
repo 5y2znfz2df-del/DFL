@@ -102,7 +102,7 @@ fn main() -> eframe::Result<()> {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([980.0, 650.0])
+        .with_inner_size([1000.0, 690.0])
         .with_min_inner_size([880.0, 560.0])
         .with_title(APP_NAME);
 
