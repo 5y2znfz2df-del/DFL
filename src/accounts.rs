@@ -220,12 +220,14 @@ pub fn ms_login_minecraft(ms_access: &str) -> Result<McProfile> {
         id: String,
         name: String,
     }
-    let profile: Profile = client
+    let resp = client
         .get("https://api.minecraftservices.com/minecraft/profile")
         .bearer_auth(&mc.access_token)
-        .send()?
-        .error_for_status()?
-        .json()?;
+        .send()?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("该微软账号未拥有 Minecraft（需购买 Java 版，或开通 PC Game Pass）");
+    }
+    let profile: Profile = resp.error_for_status()?.json()?;
 
     Ok(McProfile {
         uuid: profile.id,

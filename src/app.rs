@@ -1006,7 +1006,22 @@ impl LauncherApp {
                         }
                         1 => {
                             ui.label(
-                                RichText::new("微软设备码登录（需要 Azure 客户端 ID）")
+                                RichText::new("前提：该微软账号已购买 Minecraft Java 版，或已开通 PC Game Pass")
+                                    .size(10.0)
+                                    .color(p.sub),
+                            );
+                            ui.add_space(4.0);
+                            if ui
+                                .add(ghost_button(&p, "没买？去官网看看", 118.0))
+                                .clicked()
+                            {
+                                util::open_url(
+                                    "https://www.minecraft.net/zh-hans/store/minecraft-java-bedrock-edition-pc",
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("微软设备码登录（需要 Azure 客户端 ID，见下方说明）")
                                     .size(10.5)
                                     .color(p.sub),
                             );
