@@ -27,7 +27,7 @@
 | Java 探测（PATH / 常见目录 / 手动指定） | ✅ |
 | 启动内核：classpath / natives / 参数占位符 / 进程与日志 | ✅ 已进入游戏主菜单 |
 
-| 账号（离线多账号 / 微软设备码 / Yggdrasil） | ✅ |
+| 账号（离线多账号 / 微软设备码 / Yggdrasil + authlib-injector 注入） | ✅ |
 | Java 自动下载（Adoptium） | ⏳ |
 
 

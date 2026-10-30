@@ -145,6 +145,7 @@ pub struct LauncherApp {
     dlg: Option<DownloadDialog>,
     loader_rx: Option<Receiver<Result<Vec<String>, String>>>,
     instances: Vec<instance::Instance>,
+    inst_confirm: Option<String>,
     inst_edit: Option<instance::Instance>,
     installed_sub: usize,
 }
@@ -242,7 +243,7 @@ impl LauncherApp {
             java_status: String::from("检测中…"),
             textures_loaded: false,
             accounts: accounts::Accounts::load(),
-            acc_tab: 0,
+            acc_tab: std::env::var("DFL_ACCTAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             acc_name: String::new(),
             acc_server: String::new(),
             acc_user: String::new(),
@@ -261,6 +262,7 @@ impl LauncherApp {
             dlg: boot_dialog,
             loader_rx: None,
             instances: instance::list(),
+            inst_confirm: None,
             inst_edit: None,
             installed_sub: 0,
         }
@@ -433,6 +435,7 @@ impl eframe::App for LauncherApp {
         self.poll_aux(ctx);
         self.render_dialog(ctx);
         self.render_instance_edit(ctx);
+        self.render_delete_confirm(ctx);
         self.sidebar(ctx);
         self.status_bar(ctx);
 
@@ -1012,6 +1015,22 @@ impl LauncherApp {
                                     .hint_text("Azure 应用客户端 ID")
                                     .desired_width(300.0),
                             );
+                            ui.add_space(6.0);
+                            if ui
+                                .add(ghost_button(&p, "如何获取？打开 Azure 门户", 178.0))
+                                .clicked()
+                            {
+                                util::open_url(
+                                    "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+                                );
+                            }
+                            ui.label(
+                                RichText::new(
+                                    "步骤：应用注册 → 新注册 → 账户类型选「个人 Microsoft 账户」→ 复制「应用程序(客户端) ID」→ 身份验证中开启「允许公共客户端流」",
+                                )
+                                .size(9.5)
+                                .color(p.sub),
+                            );
                             ui.add_space(8.0);
                             if self.ms_device.is_none() {
                                 if ui.add(primary_button(&p, "获取设备码", 110.0, 32.0)).clicked() {
@@ -1524,9 +1543,15 @@ impl LauncherApp {
                         if dlg.loader == 1 {
                             ui.add_space(8.0);
                             ui.label(RichText::new("Fabric Loader 版本").size(11.0).color(p.sub));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dlg.loader_ver)
+                                    .hint_text("留空自动选最新稳定版，或手动填版本")
+                                    .desired_width(330.0),
+                            );
+                            ui.add_space(4.0);
                             if dlg.loaders.is_empty() {
                                 ui.label(
-                                    RichText::new("正在获取版本列表…（留空自动选最新稳定版）")
+                                    RichText::new("正在获取版本列表…（也可直接手动填写）")
                                         .size(10.0)
                                         .color(p.sub),
                                 );
@@ -1706,7 +1731,7 @@ impl LauncherApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui.small_button("删除").clicked() {
-                                            delete = Some(inst.name.clone());
+                                            self.inst_confirm = Some(inst.name.clone());
                                         }
                                         if ui.small_button("打开").clicked() {
                                             open = Some(inst.name.clone());
@@ -1751,6 +1776,79 @@ impl LauncherApp {
                 }
                 Err(e) => self.notify(format!("删除失败: {e:#}")),
             }
+        }
+    }
+
+
+    fn render_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some(name) = self.inst_confirm.clone() else {
+            return;
+        };
+        let p = self.p();
+        let mut yes = false;
+        let mut no = false;
+        egui::Area::new(egui::Id::new("delete_instance"))
+            .fixed_pos(egui::pos2(235.0, 120.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(p.card)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(14)
+                    .inner_margin(18)
+                    .show(ui, |ui| {
+                        ui.set_width(300.0);
+                        ui.label(
+                            RichText::new(format!("删除实例「{name}」？"))
+                                .size(14.0)
+                                .strong()
+                                .color(p.text),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("实例目录（含存档、mods、配置）会被整个删除，不可恢复。")
+                                .size(10.5)
+                                .color(p.sub),
+                        );
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("删除").size(12.0).color(Color32::WHITE),
+                                    )
+                                    .fill(Color32::from_rgb(255, 59, 48))
+                                    .stroke(Stroke::NONE)
+                                    .corner_radius(8)
+                                    .min_size(egui::vec2(80.0, 30.0)),
+                                )
+                                .clicked()
+                            {
+                                yes = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.add(ghost_button(&p, "取消", 70.0)).clicked() {
+                                no = true;
+                            }
+                        });
+                    });
+            });
+        if yes {
+            match instance::delete(&name) {
+                Ok(()) => {
+                    if self.config.last_instance == name {
+                        self.config.last_instance.clear();
+                        let _ = self.config.save();
+                    }
+                    self.instances = instance::list();
+                    self.notify(format!("已删除实例 {name}"));
+                }
+                Err(e) => self.notify(format!("删除失败: {e:#}")),
+            }
+            self.inst_confirm = None;
+        }
+        if no {
+            self.inst_confirm = None;
         }
     }
 

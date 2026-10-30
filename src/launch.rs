@@ -145,6 +145,25 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
         .filter(|m| *m > 0)
         .unwrap_or(cfg.max_memory_mb)
         .max(256);
+    // 外置登录：注入 authlib-injector
+    let mut injector_arg: Option<String> = None;
+    if let Some(acc) = &active {
+        if acc.kind == "yggdrasil" && !acc.server.trim().is_empty() {
+            match ensure_authlib_injector(tx) {
+                Ok(jar) => {
+                    injector_arg = Some(format!(
+                        "-javaagent:{}={}",
+                        jar.display(),
+                        acc.server.trim()
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(net::Msg::Log(format!("authlib-injector 下载失败: {e}")));
+                }
+            }
+        }
+    }
+
     let mut args: Vec<String> = vec![
         format!("-Xms{}m", cfg.min_memory_mb.min(max_mem).max(128)),
         format!("-Xmx{}m", max_mem),
@@ -156,6 +175,9 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
         for extra in i.jvm_args.split_whitespace() {
             args.push(extra.to_string());
         }
+    }
+    if let Some(arg) = injector_arg {
+        args.push(arg);
     }
 
     if let Some(arguments) = &vj.arguments {
@@ -219,4 +241,31 @@ fn offline_uuid(name: &str) -> String {
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
     )
+}
+
+/// 下载 authlib-injector（BMCLAPI 镜像优先）
+fn ensure_authlib_injector(tx: &Sender<net::Msg>) -> Result<std::path::PathBuf> {
+    let path = util::libraries_dir().join("authlib-injector.jar");
+    if path.exists() {
+        return Ok(path);
+    }
+    let client = net::client()?;
+    let sources = [
+        "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json",
+        "https://authlib-injector.yushi.moe/artifact/latest.json",
+    ];
+    for url in sources {
+        let Ok(resp) = client.get(url).send().and_then(|r| r.error_for_status()) else {
+            continue;
+        };
+        let Ok(value) = resp.json::<serde_json::Value>() else {
+            continue;
+        };
+        if let Some(dl) = value.get("download_url").and_then(|v| v.as_str()) {
+            let _ = tx.send(net::Msg::Stage("下载 authlib-injector".to_string()));
+            net::download(&client, dl, &path, None, tx)?;
+            return Ok(path);
+        }
+    }
+    anyhow::bail!("所有镜像均不可用")
 }
