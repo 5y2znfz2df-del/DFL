@@ -35,7 +35,16 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
     let mut classpath: Vec<String> = Vec::new();
     for lib in meta::resolve_libraries(vj, base) {
         if !lib.dest.exists() {
-            bail!("依赖库缺失: {}（请重新下载该版本）", lib.dest.display());
+            let _ = tx.send(net::Msg::Stage(format!(
+                "补全依赖 {}",
+                lib.dest.file_name().unwrap_or_default().to_string_lossy()
+            )));
+            let client = net::client()?;
+            let result = net::download(&client, &lib.url, &lib.dest, None, tx)
+                .or_else(|_| net::download(&client, &lib.fallback, &lib.dest, None, tx));
+            if result.is_err() {
+                bail!("依赖库下载失败: {}", lib.dest.display());
+            }
         }
         classpath.push(lib.dest.to_string_lossy().to_string());
     }
@@ -70,12 +79,38 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
         .as_ref()
         .map(|a| a.id.clone())
         .unwrap_or_else(|| vj.assets.clone());
-    let username = if cfg.username.trim().is_empty() {
-        "Steve".to_string()
+    let accounts = crate::accounts::Accounts::load();
+    let active = accounts.active_account().cloned();
+    let username = active
+        .as_ref()
+        .map(|a| a.name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg.username.trim().is_empty() {
+                "Steve".to_string()
+            } else {
+                cfg.username.trim().to_string()
+            }
+        });
+    let uuid = active
+        .as_ref()
+        .map(|a| a.uuid.clone())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| offline_uuid(&username));
+    let access_token = active
+        .as_ref()
+        .map(|a| a.token.clone())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "0".to_string());
+    let user_type = if active
+        .as_ref()
+        .map(|a| a.kind == "microsoft" || a.kind == "yggdrasil")
+        .unwrap_or(false)
+    {
+        "msa"
     } else {
-        cfg.username.trim().to_string()
+        "legacy"
     };
-    let uuid = offline_uuid(&username);
 
     let map: Vec<(String, String)> = vec![
         ("auth_player_name".into(), username),
@@ -84,10 +119,10 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
         ("assets_root".into(), assets_dir.to_string_lossy().to_string()),
         ("assets_index_name".into(), index_id),
         ("auth_uuid".into(), uuid),
-        ("auth_access_token".into(), "0".into()),
+        ("auth_access_token".into(), access_token),
         ("clientid".into(), String::new()),
         ("auth_xuid".into(), String::new()),
-        ("user_type".into(), "legacy".into()),
+        ("user_type".into(), user_type.into()),
         ("version_type".into(), "release".into()),
         (
             "natives_directory".into(),
@@ -103,12 +138,24 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
         ),
     ];
 
+    let inst = crate::instance::load(cfg.last_instance.trim());
+    let max_mem = inst
+        .as_ref()
+        .map(|i| i.memory_mb)
+        .filter(|m| *m > 0)
+        .unwrap_or(cfg.max_memory_mb)
+        .max(256);
     let mut args: Vec<String> = vec![
-        format!("-Xms{}m", cfg.min_memory_mb.max(128)),
-        format!("-Xmx{}m", cfg.max_memory_mb.max(256)),
+        format!("-Xms{}m", cfg.min_memory_mb.min(max_mem).max(128)),
+        format!("-Xmx{}m", max_mem),
     ];
     for extra in cfg.jvm_args.split_whitespace() {
         args.push(extra.to_string());
+    }
+    if let Some(i) = &inst {
+        for extra in i.jvm_args.split_whitespace() {
+            args.push(extra.to_string());
+        }
     }
 
     if let Some(arguments) = &vj.arguments {

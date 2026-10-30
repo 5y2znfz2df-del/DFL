@@ -6,6 +6,7 @@ mod config;
 mod fabric;
 mod modrinth;
 mod install;
+mod instance;
 mod java;
 mod launch;
 mod meta;

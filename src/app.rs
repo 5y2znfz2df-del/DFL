@@ -3,7 +3,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use eframe::egui;
 use egui::{Color32, RichText, Stroke};
 
-use crate::{accounts, config::Config, fabric, java, meta, modrinth, net, util};
+use crate::{accounts, config::Config, fabric, instance, java, meta, modrinth, net, util};
 
 pub const APP_NAME: &str = "DFL";
 
@@ -144,6 +144,9 @@ pub struct LauncherApp {
     mods_busy: bool,
     dlg: Option<DownloadDialog>,
     loader_rx: Option<Receiver<Result<Vec<String>, String>>>,
+    instances: Vec<instance::Instance>,
+    inst_edit: Option<instance::Instance>,
+    installed_sub: usize,
 }
 
 pub struct DownloadDialog {
@@ -248,7 +251,7 @@ impl LauncherApp {
             ms_status: String::new(),
             acc_rx: None,
             acc_busy: false,
-            mods_tab: 0,
+            mods_tab: std::env::var("DFL_MODTAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             mods_query: std::env::var("DFL_MODQ").unwrap_or_default(),
             mods: Vec::new(),
             mods_loading: false,
@@ -257,6 +260,9 @@ impl LauncherApp {
             mods_busy: false,
             dlg: boot_dialog,
             loader_rx: None,
+            instances: instance::list(),
+            inst_edit: None,
+            installed_sub: 0,
         }
     }
 
@@ -426,6 +432,7 @@ impl eframe::App for LauncherApp {
         self.poll_worker(ctx);
         self.poll_aux(ctx);
         self.render_dialog(ctx);
+        self.render_instance_edit(ctx);
         self.sidebar(ctx);
         self.status_bar(ctx);
 
@@ -440,6 +447,7 @@ impl eframe::App for LauncherApp {
             .show(ctx, |ui| match self.page {
                 Page::Home => self.page_home(ui),
                 Page::Versions => self.page_versions(ui),
+                Page::Instances => self.page_instances(ui),
                 Page::Accounts => self.page_accounts(ui),
                 Page::Mods => self.page_mods(ui),
                 Page::Settings => self.page_settings(ui),
@@ -669,6 +677,9 @@ impl LauncherApp {
                 .size(10.5)
                 .color(p.sub),
             );
+            for line in self.logs.iter().rev().take(3).rev() {
+                ui.label(RichText::new(line).size(9.5).color(p.sub));
+            }
         }
 
         ui.add_space(10.0);
@@ -845,7 +856,7 @@ impl LauncherApp {
     }
 
     fn load_mods(&mut self) {
-        if self.mods_loading {
+        if self.mods_loading || self.mods_tab >= 4 {
             return;
         }
         let typed = self.mods_query.trim().to_string();
@@ -1167,7 +1178,7 @@ impl LauncherApp {
         let p = self.p();
         big_title(ui, &p, "模组与资源", "推荐模组、光影加载器与光影包，一键装进当前实例");
 
-        let tabs = ["性能优化", "玩法 Mod", "光影加载器", "光影包"];
+        let tabs = ["性能优化", "玩法 Mod", "光影加载器", "光影包", "已安装"];
         let mut switch: Option<usize> = None;
         let mut refresh = false;
         let mut install: Option<(String, String)> = None;
@@ -1184,12 +1195,16 @@ impl LauncherApp {
                 .fill(if selected { p.accent } else { p.pill })
                 .stroke(Stroke::NONE)
                 .corner_radius(8)
-                .min_size(egui::vec2(70.0, 28.0));
+                .min_size(egui::vec2(58.0, 28.0));
                 if ui.add(btn).clicked() && !selected {
                     switch = Some(i);
                 }
             }
         });
+        if self.mods_tab == 4 {
+            self.page_installed(ui);
+            return;
+        }
         ui.add_space(8.0);
         let mut do_search = false;
         ui.horizontal(|ui| {
@@ -1271,7 +1286,7 @@ impl LauncherApp {
                                         RichText::new(&hit.title).size(13.0).strong().color(p.text),
                                     );
                                     ui.add_space(2.0);
-                                    let desc: String = hit.description.chars().take(44).collect();
+                                    let desc: String = hit.description.chars().take(36).collect();
                                     ui.label(RichText::new(desc).size(10.5).color(p.sub));
                                 });
                                 ui.with_layout(
@@ -1310,6 +1325,136 @@ impl LauncherApp {
         }
         if let Some((project, title)) = install {
             self.install_mod(project, title);
+        }
+    }
+
+
+    fn page_installed(&mut self, ui: &mut egui::Ui) {
+        let p = self.p();
+        let subs = [("mods", "模组"), ("resourcepacks", "资源包"), ("shaderpacks", "光影")];
+        let mut sub_switch: Option<usize> = None;
+        let mut open_dir = false;
+        ui.horizontal(|ui| {
+            for (i, (_, label)) in subs.iter().enumerate() {
+                let selected = self.installed_sub == i;
+                let btn = egui::Button::new(
+                    RichText::new(*label).size(12.0).color(if selected {
+                        p.on_accent
+                    } else {
+                        p.text
+                    }),
+                )
+                .fill(if selected { p.accent } else { p.pill })
+                .stroke(Stroke::NONE)
+                .corner_radius(8)
+                .min_size(egui::vec2(64.0, 26.0));
+                if ui.add(btn).clicked() && !selected {
+                    sub_switch = Some(i);
+                }
+            }
+            ui.add_space(10.0);
+            if ui.add(ghost_button(&p, "打开目录", 82.0)).clicked() {
+                open_dir = true;
+            }
+        });
+        if let Some(i) = sub_switch {
+            self.installed_sub = i;
+        }
+        let (sub, _) = subs[self.installed_sub.min(2)];
+        let inst_name = self.config.last_instance.clone();
+        if open_dir {
+            let base = if inst_name.trim().is_empty() {
+                util::instances_dir().join("_global")
+            } else {
+                instance::dir(&inst_name)
+            };
+            util::open_url(&base.join(sub).to_string_lossy());
+        }
+
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(format!(
+                "实例：{}",
+                if inst_name.trim().is_empty() {
+                    "_global".to_string()
+                } else {
+                    inst_name.clone()
+                }
+            ))
+            .size(10.5)
+            .color(p.sub),
+        );
+        ui.add_space(6.0);
+
+        let files = instance::list_files(sub, &inst_name);
+        let mut toggle: Option<std::path::PathBuf> = None;
+        let mut delete: Option<std::path::PathBuf> = None;
+        if files.is_empty() {
+            ui.label(
+                RichText::new("这个目录还是空的，可以先在上面几个标签页里安装。")
+                    .size(11.0)
+                    .color(p.sub),
+            );
+        }
+        let h = (ui.available_height() - 10.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(h)
+            .show(ui, |ui| {
+                for (path, enabled) in &files {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    egui::Frame::NONE
+                        .fill(p.card)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(10)
+                        .inner_margin(10)
+                        .show(ui, |ui| {
+                            ui.set_width(330.0);
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new(name.clone()).size(12.0).color(if *enabled {
+                                            p.text
+                                        } else {
+                                            p.sub
+                                        }),
+                                    );
+                                    ui.label(
+                                        RichText::new(if *enabled { "已启用" } else { "已禁用" })
+                                            .size(9.5)
+                                            .color(if *enabled { p.accent } else { p.sub }),
+                                    );
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("删除").clicked() {
+                                            delete = Some(path.clone());
+                                        }
+                                        if ui
+                                            .small_button(if *enabled { "禁用" } else { "启用" })
+                                            .clicked()
+                                        {
+                                            toggle = Some(path.clone());
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    ui.add_space(6.0);
+                }
+            });
+        if let Some(path) = toggle {
+            match instance::toggle(&path) {
+                Ok(()) => self.notify("已切换启用状态"),
+                Err(e) => self.notify(format!("操作失败: {e:#}")),
+            }
+        }
+        if let Some(path) = delete {
+            match std::fs::remove_file(&path) {
+                Ok(()) => self.notify("已删除"),
+                Err(e) => self.notify(format!("删除失败: {e}")),
+            }
         }
     }
 
@@ -1461,6 +1606,216 @@ impl LauncherApp {
         }
         if !cancel {
             self.dlg = Some(dlg);
+        }
+    }
+
+
+    fn page_instances(&mut self, ui: &mut egui::Ui) {
+        let p = self.p();
+        big_title(ui, &p, "实例管理", "每个实例有独立的 mods、存档、配置、内存与 JVM 参数");
+
+        let mut refresh = false;
+        let mut open_dir = false;
+        ui.horizontal(|ui| {
+            if ui.add(ghost_button(&p, "刷新", 54.0)).clicked() {
+                refresh = true;
+            }
+            if ui.add(ghost_button(&p, "打开实例目录", 104.0)).clicked() {
+                open_dir = true;
+            }
+        });
+        if refresh {
+            self.instances = instance::list();
+        }
+        if open_dir {
+            util::open_url(&util::instances_dir().to_string_lossy());
+        }
+
+        ui.add_space(10.0);
+        if self.instances.is_empty() {
+            ui.label(
+                RichText::new("还没有实例。到「版本管理」点下载，在弹窗里命名并选择加载器即可创建。")
+                    .size(11.5)
+                    .color(p.sub),
+            );
+            return;
+        }
+
+        let list = self.instances.clone();
+        let mut use_id: Option<String> = None;
+        let mut edit: Option<instance::Instance> = None;
+        let mut delete: Option<String> = None;
+        let mut open: Option<String> = None;
+
+        let h = (ui.available_height() - 10.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(h)
+            .show(ui, |ui| {
+                for inst in &list {
+                    egui::Frame::NONE
+                        .fill(p.card)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(12)
+                        .inner_margin(14)
+                        .show(ui, |ui| {
+                            ui.set_width(330.0);
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    let active = self.config.last_instance == inst.name;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&inst.name)
+                                                .size(14.0)
+                                                .strong()
+                                                .color(p.text),
+                                        );
+                                        if active {
+                                            ui.label(
+                                                RichText::new("使用中").size(9.5).color(p.accent),
+                                            );
+                                        }
+                                    });
+                                    ui.add_space(2.0);
+                                    let loader = if inst.loader.is_empty() {
+                                        "原版".to_string()
+                                    } else {
+                                        format!("{} {}", inst.loader, inst.loader_version)
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {}",
+                                            if inst.minecraft.is_empty() {
+                                                &inst.version
+                                            } else {
+                                                &inst.minecraft
+                                            },
+                                            loader
+                                        ))
+                                        .size(10.5)
+                                        .color(p.sub),
+                                    );
+                                    let mem = if inst.memory_mb > 0 {
+                                        format!("{} MB", inst.memory_mb)
+                                    } else {
+                                        "跟随全局".to_string()
+                                    };
+                                    ui.label(RichText::new(format!("内存 {}", mem)).size(10.0).color(p.sub));
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("删除").clicked() {
+                                            delete = Some(inst.name.clone());
+                                        }
+                                        if ui.small_button("打开").clicked() {
+                                            open = Some(inst.name.clone());
+                                        }
+                                        if ui.small_button("编辑").clicked() {
+                                            edit = Some(inst.clone());
+                                        }
+                                        if ui.small_button("使用").clicked() {
+                                            use_id = Some(inst.name.clone());
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+            });
+
+        if let Some(name) = use_id {
+            self.config.last_instance = name.clone();
+            if let Some(i) = self.instances.iter().find(|i| i.name == name) {
+                self.config.last_version = i.version.clone();
+            }
+            let _ = self.config.save();
+            self.notify(format!("已切换到实例 {name}"));
+        }
+        if let Some(name) = open {
+            util::open_url(&instance::dir(&name).to_string_lossy());
+        }
+        if let Some(inst) = edit {
+            self.inst_edit = Some(inst);
+        }
+        if let Some(name) = delete {
+            match instance::delete(&name) {
+                Ok(()) => {
+                    if self.config.last_instance == name {
+                        self.config.last_instance.clear();
+                        let _ = self.config.save();
+                    }
+                    self.instances = instance::list();
+                    self.notify(format!("已删除实例 {name}"));
+                }
+                Err(e) => self.notify(format!("删除失败: {e:#}")),
+            }
+        }
+    }
+
+    fn render_instance_edit(&mut self, ctx: &egui::Context) {
+        let Some(mut inst) = self.inst_edit.take() else {
+            return;
+        };
+        let p = self.p();
+        let mut save = false;
+        let mut cancel = false;
+        egui::Area::new(egui::Id::new("instance_edit"))
+            .fixed_pos(egui::pos2(215.0, 70.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(p.card)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(14)
+                    .inner_margin(18)
+                    .show(ui, |ui| {
+                        ui.set_width(360.0);
+                        ui.label(
+                            RichText::new(format!("编辑实例 · {}", inst.name))
+                                .size(15.0)
+                                .strong()
+                                .color(p.text),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("内存上限（0 = 跟随全局）").size(11.0).color(p.sub));
+                        ui.add(
+                            egui::DragValue::new(&mut inst.memory_mb)
+                                .range(0..=65536)
+                                .speed(64.0)
+                                .suffix(" MB"),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("额外 JVM 参数").size(11.0).color(p.sub));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut inst.jvm_args)
+                                .hint_text("-XX:+UseG1GC 等")
+                                .desired_width(320.0),
+                        );
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(primary_button(&p, "保存", 90.0, 32.0)).clicked() {
+                                save = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.add(ghost_button(&p, "取消", 70.0)).clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+            });
+        if save {
+            match instance::save(&inst) {
+                Ok(()) => {
+                    self.instances = instance::list();
+                    self.notify("实例设置已保存");
+                }
+                Err(e) => self.notify(format!("保存失败: {e:#}")),
+            }
+        }
+        if !save && !cancel {
+            self.inst_edit = Some(inst);
         }
     }
 
@@ -1852,6 +2207,7 @@ impl LauncherApp {
                 Ok(net::Msg::InstanceCreated(name)) => {
                     self.config.last_instance = name;
                     let _ = self.config.save();
+                    self.instances = instance::list();
                 }
                 Ok(net::Msg::Failed(err)) => {
                     self.installing = false;
