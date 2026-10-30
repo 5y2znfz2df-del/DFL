@@ -22,13 +22,19 @@
 |---|---|
 | 界面骨架 / 配置 / 字体 / 图标 | ✅ |
 | 版本清单（BMCLAPI + 官方回退） | ✅ |
-| 版本下载：version JSON / client.jar / 资源索引（SHA1 + 进度） | ✅ |
-| 游戏启动（classpath / natives / JVM 参数） | ⏳ |
+| 版本下载：version JSON / client.jar / 资源索引 / 64 个依赖库 / 3.5k 资源对象（SHA1 + 进度） | ✅ |
+| Java 探测（PATH / 常见目录 / 手动指定） | ✅ |
+| 启动内核：classpath / natives / 参数占位符 / 进程与日志 | ✅ 已进入游戏主菜单 |
+
 | 账号（离线 / 微软 / 外置） | ⏳ |
-| Java 探测与下载 | ⏳ |
+| Java 自动下载（Adoptium） | ⏳ |
 | 模组 / 资源包 / 光影 | ⏳ |
 
 ![版本管理](docs/shot-versions.png)
+
+实际启动 1.20.1 进入主菜单（DFL 下载 231MB 游戏 + 591MB 资源后启动）：
+
+![启动成功](docs/shot-game.png)
 
 ## 构建
 

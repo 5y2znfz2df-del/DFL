@@ -3,6 +3,8 @@
 mod app;
 mod config;
 mod install;
+mod java;
+mod launch;
 mod meta;
 mod net;
 mod util;
@@ -35,6 +37,37 @@ fn main() -> eframe::Result<()> {
                     net::Msg::Failed(err) => { eprintln!("[failed] {err}"); break; }
                     _ => {}
                 }
+            }
+            return Ok(());
+        }
+    }
+
+    // 无界面启动模式（调试/CI）: dfl.exe --launch <version>
+    if let Some(idx) = args.iter().position(|a| a == "--launch") {
+        if let Some(id) = args.get(idx + 1) {
+            let cfg = config::Config::load();
+            let (tx, _rx) = std::sync::mpsc::channel();
+            match launch::launch(id, &cfg, &tx) {
+                Ok(mut child) => {
+                    println!("[pid] {}", child.id());
+                    let wait: u64 = args
+                        .get(idx + 2)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(20);
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    println!("[killed]");
+                    let log = util::base_dir().join("logs").join("latest.log");
+                    if let Ok(text) = std::fs::read_to_string(&log) {
+                        let mut start = text.len().saturating_sub(6000);
+                        while start < text.len() && !text.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        println!("--- log tail ---\n{}", &text[start..]);
+                    }
+                }
+                Err(e) => eprintln!("[failed] {e:#}"),
             }
             return Ok(());
         }

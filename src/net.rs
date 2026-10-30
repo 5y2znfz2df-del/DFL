@@ -41,6 +41,8 @@ pub enum Msg {
     Log(String),
     Done(String),
     Failed(String),
+    GameStarted(u32),
+    GameExited(i32),
 }
 
 pub fn client() -> Result<reqwest::blocking::Client> {
@@ -176,5 +178,23 @@ pub fn download(
             anyhow::bail!("SHA1 校验失败: 期望 {expected}, 实际 {actual}");
         }
     }
+    Ok(())
+}
+
+/// 静默下载（资源对象等小文件），已存在则跳过
+pub fn download_simple(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+) -> Result<()> {
+    if dest.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut resp = client.get(url).send()?.error_for_status()?;
+    let mut file = File::create(dest)?;
+    std::io::copy(&mut resp, &mut file)?;
     Ok(())
 }

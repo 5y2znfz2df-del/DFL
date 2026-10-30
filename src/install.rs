@@ -1,4 +1,6 @@
 use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::{config::Config, meta, net};
@@ -43,10 +45,29 @@ pub fn install_version(cfg: &Config, entry: &net::VersionEntry, tx: Sender<net::
             // 镜像可能没有索引文件，失败后回退官方地址
             let result = net::download(&client, &mirror_url, &path, Some(&ai.sha1), &tx)
                 .or_else(|_| net::download(&client, &ai.url, &path, Some(&ai.sha1), &tx));
-            if let Err(e) = result {
-                let _ = tx.send(net::Msg::Log(format!("资源索引下载失败（可稍后重试）: {e}")));
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(net::Msg::Stage("下载游戏资源文件".to_string()));
+                    if let Err(e) = download_assets(&client, &path, &base, &tx) {
+                        let _ = tx.send(net::Msg::Log(format!("资源文件下载失败: {e}")));
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(net::Msg::Log(format!("资源索引下载失败（可稍后重试）: {e}")));
+                }
             }
         }
+
+        let libs = meta::resolve_libraries(&vj, &base);
+        let total = libs.len();
+        for (i, lib) in libs.iter().enumerate() {
+            let _ = tx.send(net::Msg::Stage(format!("依赖库 {}/{}", i + 1, total)));
+            if let Err(e) = net::download(&client, &lib.url, &lib.dest, Some(&lib.sha1), &tx) {
+                let _ = tx.send(net::Msg::Log(format!("镜像库失败，回退官方: {e}")));
+                net::download(&client, &lib.fallback, &lib.dest, Some(&lib.sha1), &tx)?;
+            }
+        }
+        let _ = tx.send(net::Msg::Log(format!("依赖库完成，共 {total} 个")));
 
         Ok(entry.id.clone())
     })();
@@ -78,4 +99,75 @@ fn get_text(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Str
         }
     }
     Err(last.unwrap_or_else(|| anyhow::anyhow!("请求失败")))
+}
+
+fn download_assets(
+    client: &reqwest::blocking::Client,
+    index_path: &std::path::Path,
+    base: &str,
+    tx: &Sender<net::Msg>,
+) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Obj {
+        hash: String,
+        size: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Index {
+        objects: std::collections::HashMap<String, Obj>,
+    }
+
+    let text = std::fs::read_to_string(index_path)?;
+    let index: Index = serde_json::from_str(&text)?;
+    let items: Vec<(String, u64)> = index
+        .objects
+        .values()
+        .map(|o| (o.hash.clone(), o.size))
+        .collect();
+    let total = items.len();
+    let _ = tx.send(net::Msg::Log(format!("资源对象 {total} 个，开始并发下载")));
+
+    let done = AtomicUsize::new(0);
+    let queue = Mutex::new(items.into_iter().enumerate());
+    let base = base.to_string();
+    let client = client.clone();
+
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let queue = &queue;
+            let done = &done;
+            let base = &base;
+            let client = &client;
+            let tx = tx.clone();
+            scope.spawn(move || {
+                loop {
+                    let next = {
+                        let mut q = queue.lock().unwrap();
+                        q.next()
+                    };
+                    let Some((_, (hash, _size))) = next else { break };
+                    let dest = crate::util::assets_dir()
+                        .join("objects")
+                        .join(&hash[0..2])
+                        .join(&hash);
+                    if !dest.exists() {
+                        let mirror = crate::meta::mirror_asset(base, &hash);
+                        let official = crate::meta::mirror_asset(crate::net::OFFICIAL, &hash);
+                        let result = crate::net::download_simple(client, &mirror, &dest)
+                            .or_else(|_| crate::net::download_simple(client, &official, &dest));
+                        if let Err(e) = result {
+                            let _ = tx.send(net::Msg::Log(format!("资源 {hash} 下载失败: {e}")));
+                        }
+                    }
+                    let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n % 128 == 0 || n == total {
+                        let _ = tx.send(net::Msg::Stage(format!("资源文件 {n}/{total}")));
+                    }
+                }
+            });
+        }
+    });
+
+    let _ = tx.send(net::Msg::Log(format!("资源文件完成，共 {total} 个")));
+    Ok(())
 }

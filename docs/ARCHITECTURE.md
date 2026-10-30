@@ -48,8 +48,8 @@ dfl/
 | `net` | BMCLAPI/官方镜像、下载、SHA1 校验、重试与回退 | ✅ |
 | `meta` | 版本清单、版本 JSON 解析、依赖库与 rules、资源索引 | ✅ 基础 |
 | `auth` | 离线 UUID、微软设备码登录、外置登录 | ⏳ |
-| `java` | 扫描注册表/常见路径、`java -version` 解析、Adoptium 下载 | ⏳ |
-| `launch` | 组装 classpath/natives/JVM 参数、启动并捕获日志 | ⏳ |
+| `java` | 扫描 PATH/常见目录、`java -version` 解析 | ✅ 探测；⏳ 下载 |
+| `launch` | 组装 classpath/natives/JVM 参数、启动并捕获日志 | ✅ |
 | `content` | 模组/资源包/光影扫描、启用禁用、下载安装 | ⏳ |
 
 ## 4. 底层原理

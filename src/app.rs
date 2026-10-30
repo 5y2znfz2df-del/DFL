@@ -22,6 +22,7 @@ pub enum Page {
     Mods,
     Accounts,
     Settings,
+    Logs,
     Sponsor,
     Github,
     About,
@@ -36,6 +37,7 @@ impl Page {
             Page::Mods => "模组与资源",
             Page::Accounts => "账号",
             Page::Settings => "设置",
+            Page::Logs => "日志",
             Page::Sponsor => "赞助支持",
             Page::Github => "GitHub",
             Page::About => "关于",
@@ -49,6 +51,7 @@ impl Page {
             "mods" => Some(Page::Mods),
             "accounts" => Some(Page::Accounts),
             "settings" => Some(Page::Settings),
+            "logs" => Some(Page::Logs),
             "sponsor" => Some(Page::Sponsor),
             "github" => Some(Page::Github),
             "about" => Some(Page::About),
@@ -77,6 +80,8 @@ pub struct LauncherApp {
     logs: Vec<String>,
     tx: Sender<net::Msg>,
     rx: Receiver<net::Msg>,
+    running: bool,
+    log_cache: String,
 }
 
 impl LauncherApp {
@@ -134,6 +139,8 @@ impl LauncherApp {
             logs: Vec::new(),
             tx,
             rx,
+            running: false,
+            log_cache: String::new(),
         }
     }
 
@@ -172,6 +179,7 @@ impl LauncherApp {
                     Page::Mods,
                     Page::Accounts,
                     Page::Settings,
+                    Page::Logs,
                     Page::Sponsor,
                     Page::Github,
                     Page::About,
@@ -289,6 +297,7 @@ impl eframe::App for LauncherApp {
                             Page::Home => self.page_home(ui),
                             Page::Versions => self.page_versions(ui),
                             Page::Settings => self.page_settings(ui),
+                            Page::Logs => self.page_logs(ui),
                             Page::Sponsor => self.page_sponsor(ui),
                             Page::Github => self.page_github(ui),
                             Page::About => self.page_about(ui),
@@ -329,17 +338,14 @@ impl LauncherApp {
                 };
                 ui.label(RichText::new(name).size(18.0).color(TEXT));
                 ui.add_space(12.0);
-                let has_version = !self.config.last_version.is_empty();
-                let btn = egui::Button::new(RichText::new("启动游戏").size(15.0).color(TEXT))
-                    .fill(if has_version { ACCENT } else { Color32::from_rgb(58, 66, 78) })
+                let ready = !self.config.last_version.is_empty() && !self.running;
+                let label = if self.running { "游戏运行中" } else { "启动游戏" };
+                let btn = egui::Button::new(RichText::new(label).size(15.0).color(TEXT))
+                    .fill(if ready { ACCENT } else { Color32::from_rgb(58, 66, 78) })
                     .corner_radius(6)
                     .min_size(egui::vec2(150.0, 38.0));
                 if ui.add(btn).clicked() {
-                    if has_version {
-                        self.notify("启动逻辑将在下一个模块接入");
-                    } else {
-                        self.notify("请先在“版本管理”中下载并选择一个版本");
-                    }
+                    self.start_game();
                 }
             });
 
@@ -541,8 +547,18 @@ impl LauncherApp {
                     let _ = self.config.save();
                     self.push_log(format!("安装完成: {id}"));
                 }
+                Ok(net::Msg::GameStarted(pid)) => {
+                    self.running = true;
+                    self.push_log(format!("游戏进程已启动，PID {pid}"));
+                }
+                Ok(net::Msg::GameExited(code)) => {
+                    self.running = false;
+                    self.install_stage = format!("游戏已退出（退出码 {code}）");
+                    self.push_log(format!("游戏已退出，退出码 {code}"));
+                }
                 Ok(net::Msg::Failed(err)) => {
                     self.installing = false;
+                    self.running = false;
                     self.versions_loading = false;
                     self.version_error = Some(err.clone());
                     self.push_log(format!("失败: {err}"));
@@ -718,6 +734,74 @@ impl LauncherApp {
                     });
             });
 
+    }
+
+
+    fn start_game(&mut self) {
+        if self.running {
+            self.notify("游戏已经在运行");
+            return;
+        }
+        let id = self.config.last_version.clone();
+        if id.is_empty() {
+            self.notify("请先在“版本管理”中下载并选择一个版本");
+            return;
+        }
+        let cfg = self.config.clone();
+        let tx = self.tx.clone();
+        self.running = true;
+        self.push_log(format!("准备启动 {id}"));
+        std::thread::spawn(move || match crate::launch::launch(&id, &cfg, &tx) {
+            Ok(mut child) => {
+                let _ = tx.send(net::Msg::GameStarted(child.id()));
+                let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                let _ = tx.send(net::Msg::GameExited(code));
+            }
+            Err(e) => {
+                let _ = tx.send(net::Msg::Failed(format!("启动失败: {e:#}")));
+            }
+        });
+    }
+
+    fn page_logs(&mut self, ui: &mut egui::Ui) {
+        self.title(ui, "日志", "logs/latest.log（游戏 stdout/stderr）与应用日志");
+        ui.horizontal(|ui| {
+            if ui.button("刷新").clicked() {
+                self.log_cache.clear();
+            }
+            if ui.button("打开日志目录").clicked() {
+                util::open_url(&util::base_dir().join("logs").to_string_lossy());
+            }
+            if ui.button("清空应用日志").clicked() {
+                self.logs.clear();
+            }
+        });
+        if self.log_cache.is_empty() {
+            let path = util::base_dir().join("logs").join("latest.log");
+            self.log_cache = match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let limit = 120_000usize;
+                    let mut start = text.len().saturating_sub(limit);
+                    while start < text.len() && !text.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    text[start..].to_string()
+                }
+                Err(_) => "（暂无日志，启动一次游戏后生成）".to_string(),
+            };
+        }
+        ui.add_space(8.0);
+        let text = self.log_cache.clone();
+        let h = (ui.available_height() - 10.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(h)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(text).size(11.0).monospace()).wrap(),
+                );
+            });
     }
 
     fn page_settings(&mut self, ui: &mut egui::Ui) {
