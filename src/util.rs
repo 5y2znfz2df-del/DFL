@@ -47,6 +47,12 @@ pub fn config_path() -> PathBuf {
     base_dir().join("config.json")
 }
 
+/// 引导配置：始终读取默认便携目录下的 config.json，
+/// 用它来决定真正的数据目录（避免自定义目录后读不到自己的配置）
+pub fn bootstrap_config_path() -> PathBuf {
+    default_portable().join("config.json")
+}
+
 pub fn versions_dir() -> PathBuf {
     base_dir().join("versions")
 }

@@ -8,9 +8,15 @@ use crate::{config::Config, meta, net, util};
 
 /// 组装参数并启动游戏进程
 pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
-    let vj = meta::load_json(id).with_context(|| format!("版本 {id} 未安装，请先下载"))?;
-    let java = crate::java::detect(&cfg.java_path)
-        .ok_or_else(|| anyhow::anyhow!("未找到 Java，请在设置中填写 java.exe 路径"))?;
+    let eff = meta::load_effective(id).with_context(|| format!("版本 {id} 未安装，请先下载"))?;
+    let vj = &eff.json;
+    let required = vj
+        .java_version
+        .as_ref()
+        .map(|j| j.major_version)
+        .unwrap_or(17);
+    let java = crate::java::ensure(&cfg.java_path, required, tx)
+        .context("未找到 Java，自动安装也失败")?;
     let _ = tx.send(net::Msg::Log(format!(
         "Java: {} ({})",
         java.full,
@@ -27,13 +33,13 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
 
     let base = cfg.mirror_base();
     let mut classpath: Vec<String> = Vec::new();
-    for lib in meta::resolve_libraries(&vj, base) {
+    for lib in meta::resolve_libraries(vj, base) {
         if !lib.dest.exists() {
             bail!("依赖库缺失: {}（请重新下载该版本）", lib.dest.display());
         }
         classpath.push(lib.dest.to_string_lossy().to_string());
     }
-    let jar = meta::jar_path(id);
+    let jar = meta::jar_path(&eff.base_id);
     if !jar.exists() {
         bail!("客户端 jar 缺失，请重新下载该版本");
     }
@@ -42,7 +48,11 @@ pub fn launch(id: &str, cfg: &Config, tx: &Sender<net::Msg>) -> Result<Child> {
 
     let natives = meta::version_dir(id).join("natives");
     let _ = std::fs::create_dir_all(&natives);
-    let game_dir = util::instances_dir().join(id);
+    let game_dir = if cfg.last_instance.trim().is_empty() {
+        util::instances_dir().join(id)
+    } else {
+        util::instances_dir().join(cfg.last_instance.trim())
+    };
     for sub in [
         "mods",
         "saves",

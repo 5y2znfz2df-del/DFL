@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounts;
 mod app;
 mod config;
+mod fabric;
+mod modrinth;
 mod install;
 mod java;
 mod launch;
@@ -73,8 +76,29 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    let boot_cfg = config::Config::load();
+    let boot_cfg = config::Config::load_from(&util::bootstrap_config_path());
     util::init(&boot_cfg.data_dir);
+    if !util::config_path().exists() {
+        let _ = boot_cfg.save();
+    }
+
+    if let Some(idx) = args.iter().position(|a| a == "--install-java") {
+        let major: u32 = args
+            .get(idx + 1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(21);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        match java::install_jre(major, &tx) {
+            Ok(p) => {
+                println!("[java] {}", p.display());
+                if let Some(info) = java::probe(p) {
+                    println!("[ok] {} ({})", info.full, info.path.display());
+                }
+            }
+            Err(e) => eprintln!("[failed] {e:#}"),
+        }
+        return Ok(());
+    }
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([980.0, 650.0])

@@ -3,7 +3,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use eframe::egui;
 use egui::{Color32, RichText, Stroke};
 
-use crate::{config::Config, java, meta, net, util};
+use crate::{accounts, config::Config, fabric, java, meta, modrinth, net, util};
 
 pub const APP_NAME: &str = "DFL";
 
@@ -123,6 +123,34 @@ pub struct LauncherApp {
     log_cache: String,
     applied_dark: bool,
     java_probe: Option<String>,
+    java_status: String,
+    textures_loaded: bool,
+    accounts: accounts::Accounts,
+    acc_tab: usize,
+    acc_name: String,
+    acc_server: String,
+    acc_user: String,
+    acc_pass: String,
+    ms_device: Option<accounts::DeviceCode>,
+    ms_status: String,
+    acc_rx: Option<Receiver<Result<accounts::Account, String>>>,
+    acc_busy: bool,
+    mods_tab: usize,
+    mods: Vec<modrinth::Hit>,
+    mods_loading: bool,
+    mods_error: Option<String>,
+    mods_rx: Option<Receiver<Result<Vec<modrinth::Hit>, String>>>,
+    mods_busy: bool,
+    dlg: Option<DownloadDialog>,
+    loader_rx: Option<Receiver<Result<Vec<String>, String>>>,
+}
+
+pub struct DownloadDialog {
+    pub entry: net::VersionEntry,
+    pub name: String,
+    pub loader: usize,
+    pub loaders: Vec<String>,
+    pub loader_ver: String,
 }
 
 impl LauncherApp {
@@ -137,31 +165,52 @@ impl LauncherApp {
         if !util::config_path().exists() {
             let _ = config.save();
         }
-
         let dark = config.theme == "dark";
         apply_theme(&cc.egui_ctx, dark);
 
-        let logo = texture_from_image(
-            &cc.egui_ctx,
-            "logo",
-            include_bytes!("../assets/icon.jpg"),
-            96,
-        );
-        let wechat = texture_from_image(
-            &cc.egui_ctx,
-            "wechat_qr",
-            include_bytes!("../assets/wechat_qr.png"),
-            560,
-        );
-        let alipay = texture_from_image(
-            &cc.egui_ctx,
-            "alipay_qr",
-            include_bytes!("../assets/alipay_qr.png"),
-            560,
-        );
-
+        let logo = None;
+        let wechat = None;
+        let alipay = None;
         let (tx, rx) = std::sync::mpsc::channel();
-
+        let mut boot_dialog = None;
+        if let Ok(v) = std::env::var("DFL_DIALOG") {
+            if !v.is_empty() {
+                boot_dialog = Some(DownloadDialog {
+                    entry: net::VersionEntry {
+                        id: v.clone(),
+                        kind: "release".to_string(),
+                        url: String::new(),
+                        time: String::new(),
+                        release_time: String::new(),
+                    },
+                    name: v,
+                    loader: 0,
+                    loaders: Vec::new(),
+                    loader_ver: String::new(),
+                });
+            }
+        }
+        {
+            let tx2 = tx.clone();
+            let cfg_path = config.java_path.clone();
+            std::thread::spawn(move || {
+                if let Some(j) = java::detect(&cfg_path) {
+                    let _ = tx2.send(net::Msg::JavaReady(format!("Java {}", j.major)));
+                    return;
+                }
+                let _ = tx2.send(net::Msg::Log("未检测到 Java，开始自动安装 JRE 21".into()));
+                match java::install_jre(21, &tx2) {
+                    Ok(p) => {
+                        if let Some(j) = java::probe(p) {
+                            let _ = tx2.send(net::Msg::JavaReady(format!("Java {}", j.major)));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(net::Msg::JavaReady(format!("未安装: {e}")));
+                    }
+                }
+            });
+        }
         Self {
             config,
             page: Page::from_env().unwrap_or(Page::Home),
@@ -186,6 +235,26 @@ impl LauncherApp {
             log_cache: String::new(),
             applied_dark: dark,
             java_probe: None,
+            java_status: String::from("检测中…"),
+            textures_loaded: false,
+            accounts: accounts::Accounts::load(),
+            acc_tab: 0,
+            acc_name: String::new(),
+            acc_server: String::new(),
+            acc_user: String::new(),
+            acc_pass: String::new(),
+            ms_device: None,
+            ms_status: String::new(),
+            acc_rx: None,
+            acc_busy: false,
+            mods_tab: 0,
+            mods: Vec::new(),
+            mods_loading: false,
+            mods_error: None,
+            mods_rx: None,
+            mods_busy: false,
+            dlg: boot_dialog,
+            loader_rx: None,
         }
     }
 
@@ -338,6 +407,12 @@ impl LauncherApp {
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.textures_loaded {
+            self.logo = texture_from_image(ctx, "logo", include_bytes!("../assets/icon.jpg"), 96);
+            self.wechat = texture_from_image(ctx, "wechat_qr", include_bytes!("../assets/wechat_qr.png"), 560);
+            self.alipay = texture_from_image(ctx, "alipay_qr", include_bytes!("../assets/alipay_qr.png"), 560);
+            self.textures_loaded = true;
+        }
         let dark = self.config.theme == "dark";
         if dark != self.applied_dark {
             apply_theme(ctx, dark);
@@ -347,6 +422,8 @@ impl eframe::App for LauncherApp {
         let dt = ctx.input(|i| i.stable_dt) as f64;
         self.toast(ctx, dt);
         self.poll_worker(ctx);
+        self.poll_aux(ctx);
+        self.render_dialog(ctx);
         self.sidebar(ctx);
         self.status_bar(ctx);
 
@@ -361,6 +438,8 @@ impl eframe::App for LauncherApp {
             .show(ctx, |ui| match self.page {
                 Page::Home => self.page_home(ui),
                 Page::Versions => self.page_versions(ui),
+                Page::Accounts => self.page_accounts(ui),
+                Page::Mods => self.page_mods(ui),
                 Page::Settings => self.page_settings(ui),
                 Page::Logs => self.page_logs(ui),
                 Page::Sponsor => self.page_sponsor(ui),
@@ -397,7 +476,8 @@ impl LauncherApp {
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
-                            "Java 自动检测 · 内存 {} MB · {}",
+                            "{} · 内存 {} MB · {}",
+                            self.java_status,
                             self.config.max_memory_mb,
                             match self.config.mirror.as_str() {
                                 "bmclapi" => "BMCLAPI",
@@ -666,7 +746,687 @@ impl LauncherApp {
             self.notify(format!("已选择 {id}"));
         }
         if let Some(v) = action {
-            self.start_install(&v);
+            self.open_dialog(v);
+        }
+    }
+
+
+    fn game_version(&self) -> String {
+        let v = &self.config.last_version;
+        if v.starts_with("fabric-loader-") {
+            v.rsplit('-').next().unwrap_or(v).to_string()
+        } else {
+            v.clone()
+        }
+    }
+
+    fn instance_dir(&self) -> std::path::PathBuf {
+        let name = if !self.config.last_instance.trim().is_empty() {
+            self.config.last_instance.clone()
+        } else if !self.config.last_version.trim().is_empty() {
+            self.config.last_version.clone()
+        } else {
+            "_global".to_string()
+        };
+        util::instances_dir().join(name)
+    }
+
+    fn open_dialog(&mut self, entry: net::VersionEntry) {
+        let name = entry.id.clone();
+        self.dlg = Some(DownloadDialog {
+            entry,
+            name,
+            loader: 0,
+            loaders: Vec::new(),
+            loader_ver: String::new(),
+        });
+    }
+
+    fn poll_aux(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = self.acc_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(acc)) => {
+                    self.accounts.upsert(acc.clone());
+                    let _ = self.accounts.save();
+                    self.config.username = acc.name.clone();
+                    let _ = self.config.save();
+                    self.ms_status = format!("已登录 {}", acc.name);
+                    self.acc_busy = false;
+                }
+                Ok(Err(e)) => {
+                    self.ms_status = format!("失败: {e}");
+                    self.acc_busy = false;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.acc_rx = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.acc_busy = false;
+                }
+            }
+        }
+        if let Some(rx) = self.mods_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(list)) => {
+                    self.mods = list;
+                    self.mods_loading = false;
+                    self.mods_busy = false;
+                }
+                Ok(Err(e)) => {
+                    self.mods_error = Some(e);
+                    self.mods_loading = false;
+                    self.mods_busy = false;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => self.mods_rx = Some(rx),
+                Err(_) => {
+                    self.mods_loading = false;
+                    self.mods_busy = false;
+                }
+            }
+        }
+        if let Some(rx) = self.loader_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(list)) => {
+                    if let Some(d) = &mut self.dlg {
+                        d.loader_ver = list.first().cloned().unwrap_or_default();
+                        d.loaders = list;
+                    }
+                }
+                Ok(Err(e)) => self.notify(format!("获取 Fabric 版本失败: {e}")),
+                Err(std::sync::mpsc::TryRecvError::Empty) => self.loader_rx = Some(rx),
+                Err(_) => {}
+            }
+        }
+        if self.acc_busy || self.mods_loading {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+    }
+
+    fn load_mods(&mut self) {
+        if self.mods_loading {
+            return;
+        }
+        let (kind, loader, category, query) = match self.mods_tab {
+            0 => ("mod", "fabric", "optimization", ""),
+            1 => ("mod", "fabric", "adventure", ""),
+            2 => ("mod", "fabric", "", "iris shaders"),
+            _ => ("shader", "", "", ""),
+        };
+        let game = self.game_version();
+        let (kind, loader, category, query) = (
+            kind.to_string(),
+            loader.to_string(),
+            category.to_string(),
+            query.to_string(),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.mods_rx = Some(rx);
+        self.mods_loading = true;
+        self.mods_error = None;
+        self.mods_busy = true;
+        std::thread::spawn(move || {
+            let r = modrinth::search(&kind, &loader, &game, &category, &query, 24)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(r);
+        });
+    }
+
+    fn install_mod(&mut self, project: String, title: String) {
+        let kind = if self.mods_tab == 3 { "shader" } else { "mod" };
+        let loader = if self.mods_tab == 2 { "fabric" } else if kind == "mod" { "fabric" } else { "" };
+        let game = self.game_version();
+        let dir = if kind == "shader" {
+            self.instance_dir().join("shaderpacks")
+        } else {
+            self.instance_dir().join("mods")
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            match modrinth::install(&project, loader, &game, &dir) {
+                Ok(file) => {
+                    let _ = tx.send(net::Msg::Info(format!("已安装 {title} → {file}")));
+                }
+                Err(e) => {
+                    let _ = tx.send(net::Msg::Failed(format!("安装 {title} 失败: {e:#}")));
+                }
+            }
+        });
+    }
+
+    fn page_accounts(&mut self, ui: &mut egui::Ui) {
+        let p = self.p();
+        big_title(ui, &p, "账号", "离线 / 微软正版 / 外置登录");
+
+        let mut switch_to: Option<String> = None;
+        let mut remove_id: Option<String> = None;
+        let mut add_offline = false;
+        let mut start_ms = false;
+        let mut start_ygg = false;
+        let mut copy_code = false;
+        let mut open_uri = false;
+
+        ui.vertical(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(350.0);
+                card(ui, &p, |ui| {
+                    ui.set_min_width(340.0);
+                    section(ui, &p, "已有账号");
+                    let list = self.accounts.accounts.clone();
+                    if list.is_empty() {
+                        ui.label(RichText::new("暂无账号").size(11.0).color(p.sub));
+                    }
+                    for acc in &list {
+                        let active = self.accounts.active.as_deref() == Some(acc.id.as_str());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(if active { "●" } else { "○" })
+                                    .size(12.0)
+                                    .color(if active { p.accent } else { p.sub }),
+                            );
+                            ui.label(RichText::new(&acc.name).size(12.5).color(p.text));
+                            ui.label(
+                                RichText::new(match acc.kind.as_str() {
+                                    "microsoft" => "正版",
+                                    "yggdrasil" => "外置",
+                                    _ => "离线",
+                                })
+                                .size(10.0)
+                                .color(p.sub),
+                            );
+                            if !active && ui.small_button("切换").clicked() {
+                                switch_to = Some(acc.id.clone());
+                            }
+                            if ui.small_button("删除").clicked() {
+                                remove_id = Some(acc.id.clone());
+                            }
+                        });
+                    }
+                });
+            });
+
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.set_width(350.0);
+                card(ui, &p, |ui| {
+                    ui.set_min_width(340.0);
+                    section(ui, &p, "添加账号");
+                    ui.horizontal(|ui| {
+                        for (i, name) in [(0usize, "离线"), (1, "微软"), (2, "外置")] {
+                            let selected = self.acc_tab == i;
+                            let btn = egui::Button::new(
+                                RichText::new(name).size(12.0).color(if selected {
+                                    p.on_accent
+                                } else {
+                                    p.text
+                                }),
+                            )
+                            .fill(if selected { p.accent } else { p.pill })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(8)
+                            .min_size(egui::vec2(60.0, 26.0));
+                            if ui.add(btn).clicked() {
+                                self.acc_tab = i;
+                            }
+                        }
+                    });
+                    ui.add_space(10.0);
+                    match self.acc_tab {
+                        0 => {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.acc_name)
+                                    .hint_text("离线用户名，如 Steve")
+                                    .desired_width(300.0),
+                            );
+                            ui.add_space(8.0);
+                            if ui.add(primary_button(&p, "添加离线账号", 130.0, 32.0)).clicked() {
+                                add_offline = true;
+                            }
+                        }
+                        1 => {
+                            ui.label(
+                                RichText::new("微软设备码登录（需要 Azure 客户端 ID）")
+                                    .size(10.5)
+                                    .color(p.sub),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.config.ms_client_id)
+                                    .hint_text("Azure 应用客户端 ID")
+                                    .desired_width(300.0),
+                            );
+                            ui.add_space(8.0);
+                            if self.ms_device.is_none() {
+                                if ui.add(primary_button(&p, "获取设备码", 110.0, 32.0)).clicked() {
+                                    start_ms = true;
+                                }
+                            } else if let Some(dc) = &self.ms_device {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&dc.user_code).size(18.0).strong().color(p.accent));
+                                    if ui.small_button("复制").clicked() {
+                                        copy_code = true;
+                                    }
+                                });
+                                ui.label(
+                                    RichText::new(format!("在 {} 输入上述代码", dc.verification_uri))
+                                        .size(10.5)
+                                        .color(p.sub),
+                                );
+                                ui.add_space(4.0);
+                                if ui.add(ghost_button(&p, "打开浏览器", 96.0)).clicked() {
+                                    open_uri = true;
+                                }
+                            }
+                            if !self.ms_status.is_empty() {
+                                ui.label(RichText::new(&self.ms_status).size(10.5).color(p.sub));
+                            }
+                        }
+                        _ => {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.acc_server)
+                                    .hint_text("认证服务器，如 https://littleskin.cn")
+                                    .desired_width(300.0),
+                            );
+                            ui.add_space(6.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.acc_user)
+                                    .hint_text("邮箱")
+                                    .desired_width(300.0),
+                            );
+                            ui.add_space(6.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.acc_pass)
+                                    .hint_text("密码")
+                                    .password(true)
+                                    .desired_width(300.0),
+                            );
+                            ui.add_space(8.0);
+                            if ui.add(primary_button(&p, "登录", 90.0, 32.0)).clicked() {
+                                start_ygg = true;
+                            }
+                        }
+                    }
+                });
+            });
+        });
+
+        if let Some(id) = switch_to {
+            self.accounts.active = Some(id.clone());
+            if let Some(acc) = self.accounts.accounts.iter().find(|a| a.id == id) {
+                self.config.username = acc.name.clone();
+            }
+            let _ = self.accounts.save();
+            let _ = self.config.save();
+            self.notify("已切换账号");
+        }
+        if let Some(id) = remove_id {
+            self.accounts.remove(&id);
+            let _ = self.accounts.save();
+            self.notify("已删除账号");
+        }
+        if add_offline {
+            let name = self.acc_name.trim().to_string();
+            if name.is_empty() {
+                self.notify("请输入用户名");
+            } else {
+                let acc = accounts::add_offline(&name);
+                self.config.username = acc.name.clone();
+                self.accounts.upsert(acc);
+                let _ = self.accounts.save();
+                let _ = self.config.save();
+                self.notify("已添加离线账号");
+            }
+        }
+        if start_ms {
+            let cid = self.config.ms_client_id.trim().to_string();
+            if cid.is_empty() {
+                self.notify("请先填写 Azure 客户端 ID");
+            } else {
+                match accounts::ms_start_device_code(&cid) {
+                    Ok(dc) => {
+                        self.ms_status = "等待浏览器授权…".into();
+                        self.ms_device = Some(dc.clone());
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.acc_rx = Some(rx);
+                        self.acc_busy = true;
+                        std::thread::spawn(move || loop {
+                            match accounts::ms_poll_token(&cid, &dc.device_code) {
+                                Ok(Some((token, _refresh))) => {
+                                    match accounts::ms_login_minecraft(&token) {
+                                        Ok(profile) => {
+                                            let acc = accounts::Account {
+                                                id: format!("ms-{}", profile.uuid),
+                                                kind: "microsoft".into(),
+                                                name: profile.name,
+                                                uuid: profile.uuid,
+                                                token,
+                                                refresh: String::new(),
+                                                server: String::new(),
+                                            };
+                                            let _ = tx.send(Ok(acc));
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(Err(format!("{e:#}")));
+                                        }
+                                    }
+                                    break;
+                                }
+                                Ok(None) => {
+                                    std::thread::sleep(std::time::Duration::from_secs(5.max(dc.interval)));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(format!("{e:#}")));
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => self.notify(format!("获取设备码失败: {e:#}")),
+                }
+            }
+        }
+        if copy_code {
+            if let Some(dc) = &self.ms_device {
+                ui.ctx().copy_text(dc.user_code.clone());
+                self.notify("已复制设备码");
+            }
+        }
+        if open_uri {
+            if let Some(dc) = &self.ms_device {
+                util::open_url(&dc.verification_uri);
+            }
+        }
+        if start_ygg {
+            let (server, user, pass) = (
+                self.acc_server.trim().to_string(),
+                self.acc_user.trim().to_string(),
+                self.acc_pass.clone(),
+            );
+            if server.is_empty() || user.is_empty() {
+                self.notify("请填写服务器与用户名");
+            } else {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.acc_rx = Some(rx);
+                self.acc_busy = true;
+                std::thread::spawn(move || {
+                    let r = accounts::yggdrasil_login(&server, &user, &pass)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(r);
+                });
+            }
+        }
+    }
+
+    fn page_mods(&mut self, ui: &mut egui::Ui) {
+        let p = self.p();
+        big_title(ui, &p, "模组与资源", "推荐模组、光影加载器与光影包，一键装进当前实例");
+
+        let tabs = ["性能优化", "玩法 Mod", "光影加载器", "光影包"];
+        let mut switch: Option<usize> = None;
+        let mut refresh = false;
+        let mut install: Option<(String, String)> = None;
+        ui.horizontal(|ui| {
+            for (i, name) in tabs.iter().enumerate() {
+                let selected = self.mods_tab == i;
+                let btn = egui::Button::new(
+                    RichText::new(*name).size(12.0).color(if selected {
+                        p.on_accent
+                    } else {
+                        p.text
+                    }),
+                )
+                .fill(if selected { p.accent } else { p.pill })
+                .stroke(Stroke::NONE)
+                .corner_radius(8)
+                .min_size(egui::vec2(70.0, 28.0));
+                if ui.add(btn).clicked() && !selected {
+                    switch = Some(i);
+                }
+            }
+            ui.add_space(10.0);
+            if ui.add(ghost_button(&p, "刷新", 48.0)).clicked() {
+                refresh = true;
+            }
+            if self.mods_loading {
+                ui.spinner();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "安装到实例：{}",
+                elide(&self.instance_dir().file_name().unwrap_or_default().to_string_lossy(), 16)
+            ))
+            .size(10.5)
+            .color(p.sub),
+        );
+        if let Some(i) = switch {
+            self.mods_tab = i;
+            self.mods.clear();
+            self.mods_error = None;
+        }
+        if refresh
+            || (self.mods.is_empty()
+                && !self.mods_loading
+                && self.mods_error.is_none()
+                && self.mods_rx.is_none())
+        {
+            self.load_mods();
+        }
+        if let Some(err) = &self.mods_error {
+            ui.add_space(6.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(err.clone())
+                        .size(11.5)
+                        .color(Color32::from_rgb(255, 59, 48)),
+                )
+                .wrap(),
+            );
+        }
+
+        ui.add_space(8.0);
+        let list = self.mods.clone();
+        let h = (ui.available_height() - 8.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(h)
+            .show(ui, |ui| {
+                for hit in &list {
+                    egui::Frame::NONE
+                        .fill(p.card)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(12)
+                        .inner_margin(12)
+                        .show(ui, |ui| {
+                            ui.set_width(330.0);
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new(&hit.title).size(13.0).strong().color(p.text),
+                                    );
+                                    ui.add_space(2.0);
+                                    let desc: String = hit.description.chars().take(44).collect();
+                                    ui.label(RichText::new(desc).size(10.5).color(p.sub));
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [56.0, 26.0],
+                                                egui::Button::new(
+                                                    RichText::new("安装").size(11.5).color(p.on_accent),
+                                                )
+                                                .fill(p.accent)
+                                                .stroke(Stroke::NONE)
+                                                .corner_radius(8),
+                                            )
+                                            .clicked()
+                                        {
+                                            install = Some((
+                                                hit.project_id.clone(),
+                                                hit.title.clone(),
+                                            ));
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+            });
+        if let Some((project, title)) = install {
+            self.install_mod(project, title);
+        }
+    }
+
+    fn render_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dlg) = self.dlg.take() else {
+            return;
+        };
+        let p = self.p();
+        let mut confirm = false;
+        let mut cancel = false;
+        let mut fetch_loaders = false;
+        let mut loader_changed = false;
+
+        egui::Area::new(egui::Id::new("download_dialog"))
+            .fixed_pos(egui::pos2(215.0, 55.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(p.card)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(14)
+                    .inner_margin(18)
+                    .show(ui, |ui| {
+                        ui.set_width(380.0);
+                        ui.label(RichText::new("下载游戏").size(16.0).strong().color(p.text));
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(format!("游戏版本：{}", dlg.entry.id))
+                                .size(11.5)
+                                .color(p.sub),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("实例名称").size(11.0).color(p.sub));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dlg.name)
+                                .desired_width(340.0)
+                                .hint_text("例如 生存整合"),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("模组加载器").size(11.0).color(p.sub));
+                        ui.horizontal(|ui| {
+                            for (i, name) in [
+                                (0usize, "不安装"),
+                                (1, "Fabric"),
+                                (2, "Quilt"),
+                                (3, "Forge"),
+                                (4, "NeoForge"),
+                            ] {
+                                let selected = dlg.loader == i;
+                                let btn = egui::Button::new(
+                                    RichText::new(name).size(12.0).color(if selected {
+                                        p.on_accent
+                                    } else {
+                                        p.text
+                                    }),
+                                )
+                                .fill(if selected { p.accent } else { p.pill })
+                                .stroke(Stroke::NONE)
+                                .corner_radius(8)
+                                .min_size(egui::vec2(72.0, 28.0));
+                                if ui.add(btn).clicked() && !selected {
+                                    dlg.loader = i;
+                                    loader_changed = true;
+                                }
+                            }
+                        });
+                        if dlg.loader == 1 {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Fabric Loader 版本").size(11.0).color(p.sub));
+                            if dlg.loaders.is_empty() {
+                                ui.label(
+                                    RichText::new("正在获取版本列表…（留空自动选最新稳定版）")
+                                        .size(10.0)
+                                        .color(p.sub),
+                                );
+                            } else {
+                                egui::ComboBox::from_id_salt("fabric_ver")
+                                    .selected_text(if dlg.loader_ver.is_empty() {
+                                        "自动（最新稳定）".to_string()
+                                    } else {
+                                        dlg.loader_ver.clone()
+                                    })
+                                    .width(210.0)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut dlg.loader_ver,
+                                            String::new(),
+                                            "自动（最新稳定）",
+                                        );
+                                        for v in &dlg.loaders {
+                                            ui.selectable_value(&mut dlg.loader_ver, v.clone(), v);
+                                        }
+                                    });
+                            }
+                        }
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(primary_button(&p, "开始下载", 110.0, 34.0)).clicked() {
+                                confirm = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.add(ghost_button(&p, "取消", 70.0)).clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+            });
+
+        if loader_changed && dlg.loader > 0 {
+            fetch_loaders = true;
+        }
+        if fetch_loaders {
+            let game = dlg.entry.id.clone();
+            let kind = ["", "fabric", "quilt", "forge", "neoforge"][dlg.loader.min(4)].to_string();
+            dlg.loaders.clear();
+            dlg.loader_ver.clear();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.loader_rx = Some(rx);
+            std::thread::spawn(move || {
+                let r = fabric::loaders(&kind, &game).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(r);
+            });
+        }
+        if confirm {
+            let name = if dlg.name.trim().is_empty() {
+                dlg.entry.id.clone()
+            } else {
+                dlg.name.trim().to_string()
+            };
+            let entry = dlg.entry.clone();
+            let loader = ["", "fabric", "quilt", "forge", "neoforge"][dlg.loader.min(4)];
+            let loader_ver = dlg.loader_ver.clone();
+            let game = entry.id.clone();
+            let cfg = self.config.clone();
+            let tx = self.tx.clone();
+            self.installing = true;
+            self.install_stage = format!("准备安装 {name}");
+            std::thread::spawn(move || {
+                let mut lv = loader_ver;
+                if !loader.is_empty() && lv.is_empty() {
+                    lv = fabric::loaders(loader, &game)
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                        .unwrap_or_default();
+                }
+                crate::install::install_full(&cfg, &entry, &name, loader, &lv, tx);
+            });
+            return;
+        }
+        if !cancel {
+            self.dlg = Some(dlg);
         }
     }
 
@@ -1046,6 +1806,18 @@ impl LauncherApp {
                     self.running = false;
                     self.install_stage = format!("游戏已退出（退出码 {code}）");
                     self.push_log(format!("游戏已退出，退出码 {code}"));
+                }
+                Ok(net::Msg::JavaReady(info)) => {
+                    self.java_status = info.clone();
+                    self.push_log(format!("Java: {info}"));
+                }
+                Ok(net::Msg::Info(text)) => {
+                    self.push_log(text.clone());
+                    self.notify(text);
+                }
+                Ok(net::Msg::InstanceCreated(name)) => {
+                    self.config.last_instance = name;
+                    let _ = self.config.save();
                 }
                 Ok(net::Msg::Failed(err)) => {
                     self.installing = false;

@@ -36,6 +36,8 @@ pub struct Config {
     pub github_url: String,
     /// 自定义数据目录（空 = exe 同级 data/）
     pub data_dir: String,
+    /// 微软登录用 Azure 客户端 ID
+    pub ms_client_id: String,
 }
 
 impl Default for Config {
@@ -56,19 +58,24 @@ impl Default for Config {
             last_instance: String::new(),
             github_url: "https://github.com/5y2znfz2df-del/DFL".to_string(),
             data_dir: String::new(),
+            ms_client_id: String::new(),
         }
     }
 }
 
 impl Config {
-    pub fn load() -> Self {
-        let path = util::config_path();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_json::from_str::<Config>(&text) {
+    pub fn load_from(path: &std::path::Path) -> Self {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let text = text.trim_start_matches('\u{feff}');
+            if let Ok(cfg) = serde_json::from_str::<Config>(text) {
                 return cfg;
             }
         }
         Config::default()
+    }
+
+    pub fn load() -> Self {
+        Self::load_from(&util::config_path())
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

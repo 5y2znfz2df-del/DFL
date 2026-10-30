@@ -43,12 +43,24 @@ pub enum Msg {
     Failed(String),
     GameStarted(u32),
     GameExited(i32),
+    JavaReady(String),
+    Info(String),
+    InstanceCreated(String),
+}
+
+pub fn client_with_timeout(secs: u64) -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent(format!("DFL/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(secs))
+        .connect_timeout(Duration::from_secs(10))
+        .http1_only()
+        .build()?)
 }
 
 pub fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .user_agent(format!("DFL/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(900))
         .connect_timeout(Duration::from_secs(10))
         .http1_only()
         .build()?)

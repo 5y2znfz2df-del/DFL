@@ -29,12 +29,12 @@ pub fn install_version(cfg: &Config, entry: &net::VersionEntry, tx: Sender<net::
         )));
 
         let _ = tx.send(net::Msg::Stage(format!("下载 {}.jar", entry.id)));
-        let jar_url = net::client_jar_url(&base, &entry.id, &vj.downloads.client.url);
+        let jar_url = net::client_jar_url(&base, &entry.id, vj.client_download().map(|c| c.url.as_str()).unwrap_or_default());
         net::download(
             &client,
             &jar_url,
             &meta::jar_path(&entry.id),
-            Some(&vj.downloads.client.sha1),
+            vj.client_download().map(|c| c.sha1.as_str()),
             &tx,
         )?;
 
@@ -170,4 +170,67 @@ fn download_assets(
 
     let _ = tx.send(net::Msg::Log(format!("资源文件完成，共 {total} 个")));
     Ok(())
+}
+
+/// 安装版本 + 可选 Fabric + 创建命名实例
+pub fn install_full(
+    cfg: &Config,
+    entry: &net::VersionEntry,
+    instance: &str,
+    loader: &str,
+    loader_ver: &str,
+    tx: Sender<net::Msg>,
+) {
+    let result = (|| -> anyhow::Result<String> {
+        install_version(cfg, entry, tx.clone());
+        let base = cfg.mirror_base().to_string();
+        let mut version_id = entry.id.clone();
+
+        if !loader.is_empty() {
+            let mut ver = loader_ver.to_string();
+            if ver.is_empty() {
+                ver = crate::fabric::loaders(loader, &entry.id)
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .unwrap_or_default();
+            }
+            version_id = if loader == "fabric" || loader == "quilt" {
+                let _ = tx.send(net::Msg::Stage(format!("安装 {} Loader", loader)));
+                crate::fabric::install_profile(loader, &entry.id, &ver)?
+            } else {
+                let java = crate::java::ensure(&cfg.java_path, 17, &tx)?;
+                crate::fabric::install_installer(loader, &entry.id, &ver, &java.path, &tx)?
+            };
+            let eff = crate::meta::load_effective(&version_id)?;
+            let client = net::client()?;
+            for lib in crate::meta::resolve_libraries(&eff.json, &base) {
+                let _ = tx.send(net::Msg::Stage(format!(
+                    "{} 依赖 {}",
+                    loader,
+                    lib.dest.file_name().unwrap_or_default().to_string_lossy()
+                )));
+                net::download(&client, &lib.url, &lib.dest, None, &tx)?;
+            }
+            let _ = tx.send(net::Msg::Done(version_id.clone()));
+        }
+
+        let dir = crate::util::instances_dir().join(instance);
+        for sub in ["mods", "saves", "resourcepacks", "shaderpacks", "config", "logs"] {
+            std::fs::create_dir_all(dir.join(sub))?;
+        }
+        let meta = serde_json::json!({
+            "name": instance,
+            "version": version_id,
+            "minecraft": entry.id,
+            "loader": loader,
+            "loader_version": loader_ver,
+        });
+        std::fs::write(dir.join("instance.json"), serde_json::to_string_pretty(&meta)?)?;
+        let _ = tx.send(net::Msg::InstanceCreated(instance.to_string()));
+        let _ = tx.send(net::Msg::Info(format!("实例 {instance} 已创建")));
+        Ok(version_id)
+    })();
+    if let Err(e) = result {
+        let _ = tx.send(net::Msg::Failed(format!("安装失败: {e:#}")));
+    }
 }

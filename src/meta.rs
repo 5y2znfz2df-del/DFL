@@ -12,7 +12,10 @@ pub struct VersionJson {
     pub main_class: String,
     #[serde(default)]
     pub assets: String,
-    pub downloads: Downloads,
+    #[serde(default)]
+    pub downloads: Option<Downloads>,
+    #[serde(default, rename = "inheritsFrom")]
+    pub inherits_from: Option<String>,
     #[serde(default, rename = "assetIndex")]
     pub asset_index: Option<AssetIndex>,
     #[serde(default)]
@@ -54,6 +57,8 @@ pub struct AssetIndex {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Library {
     pub name: String,
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub downloads: Option<LibDownloads>,
     #[serde(default)]
@@ -215,6 +220,16 @@ pub fn resolve_libraries(vj: &VersionJson, base: &str) -> Vec<LibraryFile> {
                     size: a.size,
                 });
             }
+        } else if let (Some(root), Some(path)) = (&lib.url, maven_path(&lib.name)) {
+            // Fabric / Quilt 等 maven 库：name 推导路径 + url 前缀
+            let full = format!("{}/{}", root.trim_end_matches('/'), path);
+            out.push(LibraryFile {
+                url: full.clone(),
+                fallback: full,
+                dest: util::libraries_dir().join(&path),
+                sha1: String::new(),
+                size: 0,
+            });
         }
     }
     out
@@ -265,4 +280,93 @@ pub fn asset_index_path(id: &str) -> PathBuf {
 
 pub fn installed(id: &str) -> bool {
     jar_path(id).exists() && version_dir(id).join(format!("{id}.json")).exists()
+}
+
+pub fn maven_path(name: &str) -> Option<String> {
+    let parts: Vec<&str> = name.split(':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let (group, artifact, version) = (parts[0], parts[1], parts[2]);
+    let file = match parts.get(3) {
+        Some(classifier) => format!("{artifact}-{version}-{classifier}.jar"),
+        None => format!("{artifact}-{version}.jar"),
+    };
+    Some(format!(
+        "{}/{}/{}/{}",
+        group.replace('.', "/"),
+        artifact,
+        version,
+        file
+    ))
+}
+
+impl VersionJson {
+    pub fn client_download(&self) -> Option<&ClientDownload> {
+        self.downloads.as_ref().map(|d| &d.client)
+    }
+}
+
+pub struct Effective {
+    pub json: VersionJson,
+    pub base_id: String,
+}
+
+/// 解析 inheritsFrom：子版本（Fabric 等）与父版本合并
+pub fn load_effective(id: &str) -> Result<Effective> {
+    let child = load_json(id)?;
+    let Some(parent_id) = child.inherits_from.clone() else {
+        return Ok(Effective {
+            json: child,
+            base_id: id.to_string(),
+        });
+    };
+    let parent = load_json(&parent_id)?;
+    let base_id = parent
+        .inherits_from
+        .clone()
+        .unwrap_or_else(|| parent_id.clone());
+
+    let mut merged = child.clone();
+    if merged.main_class.is_empty() {
+        merged.main_class = parent.main_class.clone();
+    }
+    if merged.asset_index.is_none() {
+        merged.asset_index = parent.asset_index.clone();
+    }
+    if merged.assets.is_empty() {
+        merged.assets = parent.assets.clone();
+    }
+    if merged.downloads.is_none() {
+        merged.downloads = parent.downloads.clone();
+    }
+    if merged.java_version.is_none() {
+        merged.java_version = parent.java_version.clone();
+    }
+
+    // 库：子在前，父在后，按 name 去重
+    let mut libs = child.libraries.clone();
+    for l in &parent.libraries {
+        if !libs.iter().any(|x| x.name == l.name) {
+            libs.push(l.clone());
+        }
+    }
+    merged.libraries = libs;
+
+    // 参数：父在前，子在后
+    match (&parent.arguments, &child.arguments) {
+        (Some(p), Some(c)) => {
+            merged.arguments = Some(Arguments {
+                game: p.game.iter().chain(c.game.iter()).cloned().collect(),
+                jvm: p.jvm.iter().chain(c.jvm.iter()).cloned().collect(),
+            });
+        }
+        (Some(p), None) => merged.arguments = Some(p.clone()),
+        _ => {}
+    }
+
+    Ok(Effective {
+        json: merged,
+        base_id,
+    })
 }
