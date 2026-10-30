@@ -34,6 +34,8 @@ pub struct Config {
     pub last_instance: String,
     /// 项目仓库地址（用于 Star 页面）
     pub github_url: String,
+    /// 自定义数据目录（空 = exe 同级 data/）
+    pub data_dir: String,
 }
 
 impl Default for Config {
@@ -47,12 +49,13 @@ impl Default for Config {
             mirror: "bmclapi".to_string(),
             custom_mirror: String::new(),
             auto_java: true,
-            theme: "dark".to_string(),
+            theme: "light".to_string(),
             username: "Steve".to_string(),
             account_type: "offline".to_string(),
             last_version: String::new(),
             last_instance: String::new(),
             github_url: "https://github.com/5y2znfz2df-del/DFL".to_string(),
+            data_dir: String::new(),
         }
     }
 }

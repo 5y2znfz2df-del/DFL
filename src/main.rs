@@ -73,6 +73,9 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let boot_cfg = config::Config::load();
+    util::init(&boot_cfg.data_dir);
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([980.0, 650.0])
         .with_min_inner_size([880.0, 560.0])

@@ -1,7 +1,21 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-/// 启动器数据目录：优先 EXE 同级的 data/（绿色便携），不可写时回退到 %APPDATA%\DFL
-pub fn base_dir() -> PathBuf {
+static BASE: OnceLock<PathBuf> = OnceLock::new();
+
+/// 启动时确定数据目录：配置里指定则用之，否则用 exe 同级 data/（便携）
+pub fn init(configured: &str) {
+    let base = if configured.trim().is_empty() {
+        default_portable()
+    } else {
+        let p = PathBuf::from(configured.trim());
+        let _ = std::fs::create_dir_all(&p);
+        p
+    };
+    let _ = BASE.set(base);
+}
+
+fn default_portable() -> PathBuf {
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -25,6 +39,10 @@ fn is_writable(dir: &std::path::Path) -> bool {
     ok
 }
 
+pub fn base_dir() -> PathBuf {
+    BASE.get().cloned().unwrap_or_else(default_portable)
+}
+
 pub fn config_path() -> PathBuf {
     base_dir().join("config.json")
 }
@@ -45,13 +63,23 @@ pub fn instances_dir() -> PathBuf {
     base_dir().join("instances")
 }
 
+pub fn logs_dir() -> PathBuf {
+    base_dir().join("logs")
+}
+
 pub fn ensure_dirs() {
-    for d in [versions_dir(), libraries_dir(), assets_dir(), instances_dir()] {
+    for d in [
+        versions_dir(),
+        libraries_dir(),
+        assets_dir(),
+        instances_dir(),
+        logs_dir(),
+    ] {
         let _ = std::fs::create_dir_all(d);
     }
 }
 
-/// 从内嵌图片生成窗口图标（缩放到 256px，避免占用过多内存）
+/// 从内嵌图片生成窗口图标（缩放到 256px）
 pub fn load_icon(bytes: &[u8]) -> Option<egui::IconData> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = (img.width(), img.height());
@@ -74,7 +102,7 @@ pub fn load_icon(bytes: &[u8]) -> Option<egui::IconData> {
     })
 }
 
-/// 打开系统浏览器
+/// 打开系统浏览器 / 资源管理器
 pub fn open_url(url: &str) {
     #[cfg(target_os = "windows")]
     {

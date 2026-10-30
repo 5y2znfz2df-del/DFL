@@ -4,7 +4,7 @@
 
 轻量级 Minecraft Java 版启动器（Windows / Rust + egui / 单 exe）。
 
-![首页](docs/shot-home.png)
+![首页](docs/ui-home.png)
 
 ## 特性（开发中）
 
@@ -20,7 +20,8 @@
 
 | 模块 | 状态 |
 |---|---|
-| 界面骨架 / 配置 / 字体 / 图标 | ✅ |
+| 界面骨架 / 配置 / 字体 / 图标（浅色 Apple 风格，可切深色） | ✅ |
+| 路径管理（数据目录自定义、各目录一键打开） | ✅ |
 | 版本清单（BMCLAPI + 官方回退） | ✅ |
 | 版本下载：version JSON / client.jar / 资源索引 / 64 个依赖库 / 3.5k 资源对象（SHA1 + 进度） | ✅ |
 | Java 探测（PATH / 常见目录 / 手动指定） | ✅ |
@@ -30,7 +31,11 @@
 | Java 自动下载（Adoptium） | ⏳ |
 | 模组 / 资源包 / 光影 | ⏳ |
 
-![版本管理](docs/shot-versions.png)
+![版本管理](docs/ui-versions.png)
+
+设置页：Java / 内存 / 网络 / 路径 / 外观，路径可一键打开，数据目录可自定义（重启生效）。
+
+![设置](docs/ui-settings.png)
 
 实际启动 1.20.1 进入主菜单（DFL 下载 231MB 游戏 + 591MB 资源后启动）：
 
