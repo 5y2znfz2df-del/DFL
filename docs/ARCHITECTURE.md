@@ -45,8 +45,8 @@ dfl/
 | `app` | 页面路由（首页/版本/实例/资源/账号/设置/关于）、主题、字体 | ✅ 已完成 |
 | `config` | 读写 `data/config.json`，镜像选择、内存、JVM 参数 | ✅ 已完成 |
 | `util` | 便携式数据目录探测、目录初始化 | ✅ 已完成 |
-| `net` | BMCLAPI/官方镜像、并发下载、SHA1 校验、重试 | ⏳ 下一模块 |
-| `meta` | 版本清单、版本 JSON 解析、依赖库与 rules、资源索引 | ⏳ |
+| `net` | BMCLAPI/官方镜像、下载、SHA1 校验、重试与回退 | ✅ |
+| `meta` | 版本清单、版本 JSON 解析、依赖库与 rules、资源索引 | ✅ 基础 |
 | `auth` | 离线 UUID、微软设备码登录、外置登录 | ⏳ |
 | `java` | 扫描注册表/常见路径、`java -version` 解析、Adoptium 下载 | ⏳ |
 | `launch` | 组装 classpath/natives/JVM 参数、启动并捕获日志 | ⏳ |

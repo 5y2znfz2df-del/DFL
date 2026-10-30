@@ -16,6 +16,20 @@
 - 日志查看
 - 赞助支持（微信 / 支付宝）与 GitHub Star 页面
 
+## 进度
+
+| 模块 | 状态 |
+|---|---|
+| 界面骨架 / 配置 / 字体 / 图标 | ✅ |
+| 版本清单（BMCLAPI + 官方回退） | ✅ |
+| 版本下载：version JSON / client.jar / 资源索引（SHA1 + 进度） | ✅ |
+| 游戏启动（classpath / natives / JVM 参数） | ⏳ |
+| 账号（离线 / 微软 / 外置） | ⏳ |
+| Java 探测与下载 | ⏳ |
+| 模组 / 资源包 / 光影 | ⏳ |
+
+![版本管理](docs/shot-versions.png)
+
 ## 构建
 
 ```powershell

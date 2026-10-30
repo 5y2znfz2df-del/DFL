@@ -1,7 +1,9 @@
 ﻿use eframe::egui;
 use egui::{Color32, RichText};
 
-use crate::{config::Config, util};
+use std::sync::mpsc::{Receiver, Sender};
+
+use crate::{config::Config, meta, net, util};
 
 pub const APP_NAME: &str = "DFL";
 
@@ -62,6 +64,19 @@ pub struct LauncherApp {
     logo: Option<egui::TextureHandle>,
     wechat: Option<egui::TextureHandle>,
     alipay: Option<egui::TextureHandle>,
+    versions: Vec<net::VersionEntry>,
+    versions_loading: bool,
+    version_error: Option<String>,
+    version_filter: String,
+    version_kind: usize,
+    selected_version: Option<String>,
+    installing: bool,
+    install_stage: String,
+    install_done: u64,
+    install_total: u64,
+    logs: Vec<String>,
+    tx: Sender<net::Msg>,
+    rx: Receiver<net::Msg>,
 }
 
 impl LauncherApp {
@@ -97,6 +112,8 @@ impl LauncherApp {
             560,
         );
 
+        let (tx, rx) = std::sync::mpsc::channel();
+
         Self {
             config,
             page: Page::from_env().unwrap_or(Page::Home),
@@ -104,6 +121,19 @@ impl LauncherApp {
             logo,
             wechat,
             alipay,
+            versions: Vec::new(),
+            versions_loading: false,
+            version_error: None,
+            version_filter: String::new(),
+            version_kind: 0,
+            selected_version: None,
+            installing: false,
+            install_stage: String::new(),
+            install_done: 0,
+            install_total: 0,
+            logs: Vec::new(),
+            tx,
+            rx,
         }
     }
 
@@ -242,6 +272,7 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let dt = ctx.input(|i| i.stable_dt) as f64;
         self.toast(ctx, dt);
+        self.poll_worker(ctx);
         self.sidebar(ctx);
         self.status_bar(ctx);
 
@@ -250,12 +281,13 @@ impl eframe::App for LauncherApp {
             .show(ctx, |ui| {
                 let w = ui.available_width();
                 ui.add_space(18.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_top(|ui| {
                     ui.add_space(22.0);
                     ui.vertical(|ui| {
                         ui.set_max_width((w - 44.0).max(320.0));
                         match self.page {
                             Page::Home => self.page_home(ui),
+                            Page::Versions => self.page_versions(ui),
                             Page::Settings => self.page_settings(ui),
                             Page::Sponsor => self.page_sponsor(ui),
                             Page::Github => self.page_github(ui),
@@ -476,6 +508,218 @@ impl LauncherApp {
         );
     }
 
+
+    fn push_log(&mut self, line: impl Into<String>) {
+        self.logs.push(line.into());
+        if self.logs.len() > 200 {
+            self.logs.remove(0);
+        }
+    }
+
+    fn poll_worker(&mut self, ctx: &egui::Context) {
+        loop {
+            match self.rx.try_recv() {
+                Ok(net::Msg::Manifest(m)) => {
+                    self.versions = m.versions.clone();
+                    self.versions_loading = false;
+                    let n = self.versions.len();
+                    self.push_log(format!("版本清单加载完成，共 {n} 个版本"));
+                }
+                Ok(net::Msg::Stage(stage)) => {
+                    self.install_stage = stage.clone();
+                    self.push_log(stage);
+                }
+                Ok(net::Msg::Progress(done, total)) => {
+                    self.install_done = done;
+                    self.install_total = total;
+                }
+                Ok(net::Msg::Log(line)) => self.push_log(line),
+                Ok(net::Msg::Done(id)) => {
+                    self.installing = false;
+                    self.install_stage = format!("安装完成: {id}");
+                    self.config.last_version = id.clone();
+                    let _ = self.config.save();
+                    self.push_log(format!("安装完成: {id}"));
+                }
+                Ok(net::Msg::Failed(err)) => {
+                    self.installing = false;
+                    self.versions_loading = false;
+                    self.version_error = Some(err.clone());
+                    self.push_log(format!("失败: {err}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        if self.installing || self.versions_loading {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+    }
+
+    fn start_manifest(&mut self) {
+        if self.versions_loading {
+            return;
+        }
+        self.versions_loading = true;
+        self.version_error = None;
+        let base = self.config.mirror_base().to_string();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || match net::fetch_manifest(&base) {
+            Ok(m) => {
+                let _ = tx.send(net::Msg::Manifest(Box::new(m)));
+            }
+            Err(e) => {
+                let _ = tx.send(net::Msg::Failed(format!("{e:#}")));
+            }
+        });
+    }
+
+    fn start_install(&mut self, entry: &net::VersionEntry) {
+        if self.installing {
+            self.notify("已有下载任务在进行");
+            return;
+        }
+        self.installing = true;
+        self.install_stage = format!("准备安装 {}", entry.id);
+        self.install_done = 0;
+        self.install_total = 0;
+        let cfg = self.config.clone();
+        let entry = entry.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || crate::install::install_version(&cfg, &entry, tx));
+    }
+
+    fn page_versions(&mut self, ui: &mut egui::Ui) {
+        self.title(
+            ui,
+            "版本管理",
+            "从 BMCLAPI / 官方源获取清单，下载版本 JSON、client.jar 与资源索引",
+        );
+
+        ui.horizontal(|ui| {
+            if ui.button("刷新版本列表").clicked() {
+                self.start_manifest();
+            }
+            egui::ComboBox::from_id_salt("version_kind")
+                .selected_text(match self.version_kind {
+                    0 => "全部",
+                    1 => "正式版",
+                    _ => "快照",
+                })
+                .width(96.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.version_kind, 0, "全部");
+                    ui.selectable_value(&mut self.version_kind, 1, "正式版");
+                    ui.selectable_value(&mut self.version_kind, 2, "快照");
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.version_filter)
+                    .hint_text("搜索版本号")
+                    .desired_width(150.0),
+            );
+            if self.versions_loading {
+                ui.spinner();
+                ui.label(RichText::new("加载中…").size(12.0).color(SUBTLE));
+            }
+        });
+
+        if let Some(err) = &self.version_error {
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(err.clone()).size(12.0).color(Color32::from_rgb(220, 110, 110))).wrap());
+        }
+
+        if self.versions.is_empty() && !self.versions_loading && self.version_error.is_none() {
+            self.start_manifest();
+        }
+
+        ui.add_space(8.0);
+        let filter = self.version_filter.trim().to_lowercase();
+        let list: Vec<net::VersionEntry> = self
+            .versions
+            .iter()
+            .filter(|v| {
+                let kind_ok = match self.version_kind {
+                    0 => true,
+                    1 => v.kind == "release",
+                    _ => v.kind == "snapshot",
+                };
+                kind_ok && (filter.is_empty() || v.id.to_lowercase().contains(&filter))
+            })
+            .take(400)
+            .cloned()
+            .collect();
+
+        if self.installing {
+            ui.add_space(6.0);
+            let frac = if self.install_total > 0 {
+                self.install_done as f32 / self.install_total as f32
+            } else {
+                0.0
+            };
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .show_percentage()
+                    .desired_width(380.0),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{}  {}/{}",
+                    self.install_stage,
+                    fmt_size(self.install_done),
+                    fmt_size(self.install_total)
+                ))
+                .size(11.0)
+                .color(SUBTLE),
+            );
+        }
+
+        let available_h = (ui.available_height() - 12.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(available_h)
+            .show(ui, |ui| {
+                egui::Grid::new("versions_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([14.0, 6.0])
+                    .show(ui, |ui| {
+                        for v in &list {
+                            let installed = meta::installed(&v.id);
+                            let color = if installed { ACCENT } else { TEXT };
+                            ui.label(RichText::new(&v.id).size(13.0).color(color));
+                            let (kind_text, kind_color) = match v.kind.as_str() {
+                                "release" => ("正式版", ACCENT),
+                                "snapshot" => ("快照", Color32::from_rgb(196, 156, 92)),
+                                _ => ("旧版", SUBTLE),
+                            };
+                            ui.label(RichText::new(kind_text).size(11.0).color(kind_color));
+                            let date = v.release_time.get(0..10).unwrap_or("").to_string();
+                            ui.label(RichText::new(date).size(11.0).color(SUBTLE));
+                            let text = if installed { "选择" } else { "下载" };
+                            if ui
+                                .add_sized(
+                                    [64.0, 22.0],
+                                    egui::Button::new(RichText::new(text).size(12.0)),
+                                )
+                                .clicked()
+                            {
+                                if installed {
+                                    self.config.last_version = v.id.clone();
+                                    let _ = self.config.save();
+                                    self.selected_version = Some(v.id.clone());
+                                    self.notify(format!("已选择 {}", v.id));
+                                } else {
+                                    self.start_install(v);
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+
+    }
+
     fn page_settings(&mut self, ui: &mut egui::Ui) {
         self.title(ui, "设置", "修改后点击“保存设置”生效");
 
@@ -631,6 +875,20 @@ impl LauncherApp {
                 .size(11.0)
                 .color(SUBTLE),
         );
+    }
+}
+
+
+fn fmt_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let b = bytes as f64;
+    if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{b} B")
     }
 }
 
