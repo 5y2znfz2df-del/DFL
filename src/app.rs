@@ -136,6 +136,7 @@ pub struct LauncherApp {
     acc_rx: Option<Receiver<Result<accounts::Account, String>>>,
     acc_busy: bool,
     mods_tab: usize,
+    mods_query: String,
     mods: Vec<modrinth::Hit>,
     mods_loading: bool,
     mods_error: Option<String>,
@@ -248,6 +249,7 @@ impl LauncherApp {
             acc_rx: None,
             acc_busy: false,
             mods_tab: 0,
+            mods_query: std::env::var("DFL_MODQ").unwrap_or_default(),
             mods: Vec::new(),
             mods_loading: false,
             mods_error: None,
@@ -846,18 +848,24 @@ impl LauncherApp {
         if self.mods_loading {
             return;
         }
-        let (kind, loader, category, query) = match self.mods_tab {
+        let typed = self.mods_query.trim().to_string();
+        let (kind, loader, category, default_query) = match self.mods_tab {
             0 => ("mod", "fabric", "optimization", ""),
             1 => ("mod", "fabric", "adventure", ""),
             2 => ("mod", "fabric", "", "iris shaders"),
             _ => ("shader", "", "", ""),
+        };
+        let query = if typed.is_empty() {
+            default_query.to_string()
+        } else {
+            typed
         };
         let game = self.game_version();
         let (kind, loader, category, query) = (
             kind.to_string(),
             loader.to_string(),
             category.to_string(),
-            query.to_string(),
+            query,
         );
         let (tx, rx) = std::sync::mpsc::channel();
         self.mods_rx = Some(rx);
@@ -1181,7 +1189,21 @@ impl LauncherApp {
                     switch = Some(i);
                 }
             }
-            ui.add_space(10.0);
+        });
+        ui.add_space(8.0);
+        let mut do_search = false;
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.mods_query)
+                    .hint_text("搜索模组 / 光影，如 sodium")
+                    .desired_width(200.0),
+            );
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                do_search = true;
+            }
+            if ui.add(ghost_button(&p, "搜索", 52.0)).clicked() {
+                do_search = true;
+            }
             if ui.add(ghost_button(&p, "刷新", 48.0)).clicked() {
                 refresh = true;
             }
@@ -1189,6 +1211,11 @@ impl LauncherApp {
                 ui.spinner();
             }
         });
+        if do_search {
+            self.mods.clear();
+            self.mods_error = None;
+            refresh = true;
+        }
         ui.add_space(4.0);
         ui.label(
             RichText::new(format!(
@@ -1274,6 +1301,13 @@ impl LauncherApp {
                     ui.add_space(8.0);
                 }
             });
+        if !self.mods_loading && self.mods.is_empty() && self.mods_error.is_none() {
+            ui.label(
+                RichText::new("没有找到结果，换个关键词或切换标签试试")
+                    .size(11.0)
+                    .color(p.sub),
+            );
+        }
         if let Some((project, title)) = install {
             self.install_mod(project, title);
         }
